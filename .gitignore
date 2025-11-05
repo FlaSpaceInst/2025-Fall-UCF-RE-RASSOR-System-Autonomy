@@ -1,0 +1,83 @@
+# =========================
+# ROS 2 / Colcon Build Artifacts
+# =========================
+build/
+install/
+log/
+
+# Ament / CMake
+ament_ws/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+*.pc
+
+# Colcon Python package metadata
+*.egg-info/
+*.egg
+dist/
+develop-eggs/
+.eggs/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Launch file pycache
+launch/__pycache__/
+
+# =========================
+# IDE / Editor Files
+# =========================
+# VS Code
+.vscode/
+.history/
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# Sublime
+*.sublime-*
+
+# =========================
+# OS-level Junk
+# =========================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =========================
+# Libraries / External
+# =========================
+# Gazebo / Ignition artifact logs
+*.world~
+~*.world
+*.sdf~
+~*.sdf
+
+# =========================
+# ROS 2 Generated Messages & Install Staging
+# =========================
+# Interface generation
+**/msg/*.h
+**/srv/*.h
+**/action/*.h
+rosidl_generator*/ 
+rosidl_typesupport*/ 
+
+
+# FSI Specific 
+ezrassor_controller/

@@ -18,7 +18,7 @@ include_directories(
   include
 )
 
-add_executable(re_rassor_mission_control src/mission_controller.cpp)
+add_executable(re_rassor_mission_control src/mission_control.cpp)
 
 ament_target_dependencies(re_rassor_mission_control
   rclcpp

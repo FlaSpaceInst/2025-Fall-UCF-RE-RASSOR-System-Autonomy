@@ -1,3 +1,5 @@
+#pragma once
+
 #include "rclcpp/rclcpp.hpp"
 #include <queue>
 #include <vector>
@@ -5,8 +7,9 @@
 
 #include "re_rassor_interfaces/msg/location_status.hpp"
 #include "re_rassor_interfaces/msg/obstacle_array.hpp"
-#include "re_rassor_interfaces/msg/new_path.hpp"
 #include "re_rassor_interfaces/srv/new_goal.hpp"
+#include "re_rassor_interfaces/srv/new_path.hpp"
+
 
 struct Waypoint {
     double x;

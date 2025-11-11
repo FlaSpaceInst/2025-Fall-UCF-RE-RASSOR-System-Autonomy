@@ -5,265 +5,77 @@
 # NEED:
 # Import actual Mission Control Node when it's available
 
-
+import os
 import pytest
 import rclpy
+import time
+
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
-from std_msgs.msg import String
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
 
-from re_rassor_interfaces.msg import ObstacleLocation
-from re_rassor_interfaces.msg import ObstacleArray as ObstacleArrayMsg
-from re_rassor_interfaces.srv import LocationStatus as LocationStatusMsg
-from re_rassor_interfaces.srv import ObstacleArray as ObstacleArraySrv
-from re_rassor_interfaces.srv import LocationStatus as LocationStatusSrv
-from re_rassor_interfaces.srv import NewGoal
-from re_rassor_interfaces.srv import FinalLocation 
-from re_rassor_interfaces.srv import InitialRoverPosition
-from re_rassor_interfaces.srv import InitialObstacleArray
-
-        
-import time
-import threading
+from re_rassor_interfaces.msg import LocationStatus
+from launch import LaunchDescription
+from launch_ros.actions import Node as LaunchNode
+import launch_testing
+import launch_testing.actions
 
 
-@pytest.fixture(scope='module')
-def ros_context():
-    """Initialize ROS2 context for all tests."""
+def generate_test_description():
+    mission_node = LaunchNode(
+        package='mission_controller',
+        executable='mission_controller_node',
+        name='mission_controller',
+        output='screen'
+    )
+
+    return LaunchDescription([
+        mission_node,
+        launch_testing.actions.ReadyToTest(),
+    ]), {
+        'mission_node': mission_node,
+    }
+
+
+@pytest.mark.launch_test
+def test_status_published(mission_node, proc_output):
+    """
+    Check that the mission controller publishes a status message 
+    when fed incoming position updates.
+    """
     rclpy.init()
-    yield
-    rclpy.shutdown()
 
+    test_node = Node("test_node")
+    received = {}
 
-@pytest.fixture
-def mission_control_node(ros_context):
-    """
-    Create and return a mission control node instance.
-    Replace 'MissionControlNode' with your actual node class.
-    """
-    # Import your actual mission control node here
-    # from your_package.mission_control import MissionControlNode
-    # node = MissionControlNode()
-    
-    # For demonstration, using a generic node
-    node = Node('test_mission_control')
-    yield node
-    node.destroy_node()
+    # subscriber to controller status
+    def callback(msg):
+        received['msg'] = msg
 
+    sub = test_node.create_subscription(
+        LocationStatus,
+        "/mission_controller/status",
+        callback,
+        10
+    )
 
-@pytest.fixture
-def executor(ros_context):
-    """Create an executor for spinning nodes."""
+    # publisher to feed position into controller
+    pub = test_node.create_publisher(LocationStatus, '/location_status', 10)
+
     executor = SingleThreadedExecutor()
-    yield executor
-    executor.shutdown()
+    executor.add_node(test_node)
 
+    # Publish a fake location status
+    msg = LocationStatus()
+    msg.position_x = 1.0
+    msg.position_y = 2.0
+    msg.velocity = 1.1
+    msg.orientation = 0.5
 
-class TestMissionControlNode:
-    """Test suite for Mission Control Node."""
-    
-    def test_node_creation(self, mission_control_node):
-        """Test that the node is created successfully."""
-        assert mission_control_node is not None
-        assert mission_control_node.get_name() == 'test_mission_control'
-    
-    def test_publishers_created(self, mission_control_node):
-        """Test that required publishers are created."""
-        # Check if specific publishers exist
-        publisher_names = [pub.topic_name for pub in mission_control_node.publishers]
-        
-        # Example: Check for command publisher
-        # assert '/mission/command' in publisher_names
-        assert isinstance(publisher_names, list)
-    
-    def test_subscriptions_created(self, mission_control_node):
-        """Test that required subscriptions are created."""
-        subscription_names = [sub.topic_name for sub in mission_control_node.subscriptions]
-        
-        # Example: Check for status subscriber
-        # assert '/robot/status' in subscription_names
-        assert isinstance(subscription_names, list)
-    
-    def test_mission_command_publishing(self, mission_control_node, executor):
-        """Test publishing mission commands."""
-        # Create a test publisher
-        pub = mission_control_node.create_publisher(String, '/mission/command', 10)
-        
-        # Create a subscriber to verify message
-        received_msgs = []
-        
-        def callback(msg):
-            received_msgs.append(msg.data)
-        
-        sub = mission_control_node.create_subscription(
-            String, '/mission/command', callback, 10
-        )
-        
-        # Publish a test message
-        msg = String()
-        msg.data = 'START_MISSION'
+    start_time = time.time()
+    while time.time() - start_time < 5.0 and 'msg' not in received:
         pub.publish(msg)
-        
-        # Spin to process callbacks
-        executor.add_node(mission_control_node)
-        for _ in range(5):
-            executor.spin_once(timeout_sec=0.1)
-        
-        # Verify message was received
-        assert len(received_msgs) > 0
-        assert received_msgs[0] == 'START_MISSION'
-        
-        mission_control_node.destroy_publisher(pub)
-        mission_control_node.destroy_subscription(sub)
-    
-    def test_waypoint_navigation(self, mission_control_node, executor):
-        """Test waypoint navigation functionality."""
-        received_paths = []
-        
-        # Create publisher for test waypoints
-        path_pub = mission_control_node.create_publisher(Path, '/mission/path', 10)
-        
-        # Create subscriber to verify path
-        def path_callback(msg):
-            received_paths.append(msg)
-        
-        path_sub = mission_control_node.create_subscription(
-            Path, '/mission/path', path_callback, 10
-        )
-        
-        # Create and publish test path
-        test_path = Path()
-        test_path.header.frame_id = 'map'
-        
-        for i in range(3):
-            pose = PoseStamped()
-            pose.pose.position.x = float(i)
-            pose.pose.position.y = float(i * 2)
-            test_path.poses.append(pose)
-        
-        path_pub.publish(test_path)
-        
-        # Spin to process
-        executor.add_node(mission_control_node)
-        for _ in range(5):
-            executor.spin_once(timeout_sec=0.1)
-        
-        # Verify
-        assert len(received_paths) > 0
-        assert len(received_paths[0].poses) == 3
-        
-        mission_control_node.destroy_publisher(path_pub)
-        mission_control_node.destroy_subscription(path_sub)
-    
-    def test_emergency_stop(self, mission_control_node, executor):
-        """Test emergency stop functionality."""
-        stop_received = []
-        
-        # Create emergency stop publisher
-        estop_pub = mission_control_node.create_publisher(String, '/emergency_stop', 10)
-        
-        def estop_callback(msg):
-            stop_received.append(msg.data)
-        
-        estop_sub = mission_control_node.create_subscription(
-            String, '/emergency_stop', estop_callback, 10
-        )
-        
-        # Publish emergency stop
-        msg = String()
-        msg.data = 'EMERGENCY_STOP'
-        estop_pub.publish(msg)
-        
-        executor.add_node(mission_control_node)
-        for _ in range(5):
-            executor.spin_once(timeout_sec=0.1)
-        
-        assert len(stop_received) > 0
-        assert stop_received[0] == 'EMERGENCY_STOP'
-        
-        mission_control_node.destroy_publisher(estop_pub)
-        mission_control_node.destroy_subscription(estop_sub)
-    
-    def test_mission_state_transitions(self, mission_control_node):
-        """Test mission state machine transitions."""
-        # This would test your actual state machine logic
-        # Example states: IDLE -> ARMED -> ACTIVE -> COMPLETED
-        
-        # Assuming your node has a get_state() method
-        # initial_state = mission_control_node.get_state()
-        # assert initial_state == 'IDLE'
-        
-        # Test state transitions
-        # mission_control_node.arm_mission()
-        # assert mission_control_node.get_state() == 'ARMED'
-        
-        pass
-    
-    def test_parameter_configuration(self, mission_control_node):
-        """Test node parameters are configured correctly."""
-        # Declare test parameters
-        mission_control_node.declare_parameter('max_speed', 2.0)
-        mission_control_node.declare_parameter('mission_timeout', 300)
-        
-        # Get and verify parameters
-        max_speed = mission_control_node.get_parameter('max_speed').value
-        timeout = mission_control_node.get_parameter('mission_timeout').value
-        
-        assert max_speed == 2.0
-        assert timeout == 300
-    
-    def test_service_availability(self, mission_control_node):
-        """Test that required services are available."""
-        # Check if service clients exist
-        # Example:
-        # services = mission_control_node.get_service_names_and_types()
-        # assert any('/mission_control/start_mission' in s for s in services)
-        pass
-
-
-def test_concurrent_operations(ros_context):
-    """Test node behavior under concurrent operations."""
-    node = Node('concurrent_test_node')
-    executor = SingleThreadedExecutor()
-    executor.add_node(node)
-    
-    # Create multiple publishers and subscribers
-    pubs = [
-        node.create_publisher(String, f'/test_topic_{i}', 10)
-        for i in range(5)
-    ]
-    
-    received = {i: [] for i in range(5)}
-    
-    def make_callback(idx):
-        def callback(msg):
-            received[idx].append(msg.data)
-        return callback
-    
-    subs = [
-        node.create_subscription(String, f'/test_topic_{i}', make_callback(i), 10)
-        for i in range(5)
-    ]
-    
-    # Publish messages concurrently
-    for i, pub in enumerate(pubs):
-        msg = String()
-        msg.data = f'message_{i}'
-        pub.publish(msg)
-    
-    # Spin to process
-    for _ in range(10):
         executor.spin_once(timeout_sec=0.1)
-    
-    # Verify all messages received
-    for i in range(5):
-        assert len(received[i]) > 0
-    
-    node.destroy_node()
-    executor.shutdown()
 
+    assert 'msg' in received, "Mission controller did not publish status"
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+    rclpy.shutdown()

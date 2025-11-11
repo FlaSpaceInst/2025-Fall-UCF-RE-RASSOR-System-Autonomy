@@ -1,0 +1,39 @@
+LidarMsg.msg
+LidarMsgArray.msg
+LocationStatus.msg
+ObstacleArray.msg
+ObstacleDetectionMsg.msg
+ObstacleDetectionMsgArray.msg
+ObstacleLocation.msg
+YoloMsg.msg
+YoloMsgArray.msg
+
+
+mission controller v1:
+take in user defined positions
+then subscribe to the relevant topics for path planning
+publish waypoints to the dstarlite planner
+subscribe to obstacles from the obstacle detection package 
+
+
+Service Calls:
+
+/path_planner/new_goal - Sends waypoint goals (NewGoal.srv with x, y)
+
+Subscribed Topics:
+
+/location_status - Receives LocationStatus.msg (position_x, position_y, velocity, orientation, goal_x, goal_y, time)
+/obstacle_array - Receives ObstacleArray.msg (array of ObstacleLocation)
+/path_planner/new_path - Receives NewPath.srv responses (new_waypoints_available, path string)
+
+Published Topics:
+
+/mission_controller/status - Publishes mission status using LocationStatus.msg format
+
+
+
+main mission control loop:
+1. receives current pose from LocationStatus topic, checks if the current pose matches the waypoint by some tolerance value
+2. if it does not match but also in the process of going to the waypoint, it sends a request to path planner
+3. if the path planner has a new path it lets the user know, behind the scenes the new path is sent to the motor controllers and the wheels start turning
+

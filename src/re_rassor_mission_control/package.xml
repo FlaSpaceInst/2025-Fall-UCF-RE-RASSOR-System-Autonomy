@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>re_rassor_mission_control</name>
+  <version>0.0.1</version>
+  <description>Mission Controller node for commanding path-planner waypoints.</description>
+
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>re_rassor_interfaces</depend>
+
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>launch_testing</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

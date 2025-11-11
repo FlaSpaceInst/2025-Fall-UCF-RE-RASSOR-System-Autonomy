@@ -13,6 +13,18 @@ from rclpy.executors import SingleThreadedExecutor
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
+
+from re_rassor_interfaces.msg import ObstacleLocation
+from re_rassor_interfaces.msg import ObstacleArray as ObstacleArrayMsg
+from re_rassor_interfaces.srv import LocationStatus as LocationStatusMsg
+from re_rassor_interfaces.srv import ObstacleArray as ObstacleArraySrv
+from re_rassor_interfaces.srv import LocationStatus as LocationStatusSrv
+from re_rassor_interfaces.srv import NewGoal
+from re_rassor_interfaces.srv import FinalLocation 
+from re_rassor_interfaces.srv import InitialRoverPosition
+from re_rassor_interfaces.srv import InitialObstacleArray
+
+        
 import time
 import threading
 

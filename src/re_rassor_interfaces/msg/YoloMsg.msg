@@ -1,0 +1,11 @@
+float64 x
+float64 y
+float64 width
+float64 height
+float64 norm_x
+float64 norm_y
+float64 norm_width
+float64 norm_height
+float64 min_angle
+float64 max_angle
+string name

@@ -9,6 +9,9 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
+  <!--<test_depend>ament_cmake_pytest</test_depend>-->
+
   <depend>rclcpp</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
@@ -19,5 +22,5 @@
   <depend>re_rassor_interfaces</depend>
   <export>
     <build_type>ament_cmake</build_type>
-  </export>
+  </export> 
 </package>

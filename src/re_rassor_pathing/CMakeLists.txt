@@ -15,7 +15,17 @@ include_directories(
 add_library(${PROJECT_NAME}_lib
   src/dstarlite.cpp
   src/state.cpp
+  src/pathsmoothing.cpp
 )
+
+add_library(pathsmooth
+  src/pathsmoothing.cpp
+)
+
+add_executable(pathsmooth_cli
+  src/pathsmooth_main.cpp
+)
+target_link_libraries(pathsmooth_cli PRIVATE pathsmooth)
 
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp
@@ -24,6 +34,10 @@ ament_target_dependencies(${PROJECT_NAME}_lib
   re_rassor_cartography
 )
 
+target_include_directories(pathsmooth PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -35,10 +49,17 @@ if(BUILD_TESTING)
   ament_add_gtest(test_dstar
     tests/test_dstar.cpp
   )
-
+  ament_add_gtest(test_pathsmooth
+    tests/test_pathsmooth.cpp
+  )
   if(TARGET test_dstar)
     target_link_libraries(test_dstar
       ${PROJECT_NAME}_lib
+    )
+  endif()
+  if(TARGET test_pathsmooth)
+    target_link_libraries(test_pathsmooth
+      pathsmooth
     )
   endif()
 endif()
@@ -54,5 +75,10 @@ install(
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
+
+install(TARGETS pathsmooth_cli
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 
 ament_package()

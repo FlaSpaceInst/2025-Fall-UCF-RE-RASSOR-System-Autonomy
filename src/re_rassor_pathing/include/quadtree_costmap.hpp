@@ -62,9 +62,9 @@ public:
     }
 
     bool isCellOccupied(int ix, int iy) const {
-        float wx = origin_x_ + ix * resolution_;
-        float wy = origin_y_ + iy * resolution_;
-        return qmap_->isAreaObstructed(wx, wy);
+        //float wx = origin_x_ + ix * resolution_;
+        //float wy = origin_y_ + iy * resolution_;
+        return qmap_->isAreaObstructed(ix, iy);
     }
 
     float resolution() const { return resolution_; }

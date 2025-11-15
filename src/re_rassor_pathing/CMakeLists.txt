@@ -6,7 +6,8 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(re_rassor_interfaces REQUIRED)
 find_package(re_rassor_cartography REQUIRED)
-
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 include_directories(
   include
@@ -22,14 +23,36 @@ add_library(pathsmooth
   src/pathsmoothing.cpp
 )
 
+# Add routing node executable
+add_executable(routing_node
+  src/routing_node.cpp
+)
+
 add_executable(pathsmooth_cli
   src/pathsmooth_main.cpp
 )
+
 target_link_libraries(pathsmooth_cli PRIVATE pathsmooth)
+
+# Link routing_node with the library
+target_link_libraries(routing_node
+  ${PROJECT_NAME}_lib
+)
 
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp
   std_msgs
+  geometry_msgs
+  re_rassor_interfaces
+  re_rassor_cartography
+)
+
+# Add dependencies for routing_node
+ament_target_dependencies(routing_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  nav_msgs
   re_rassor_interfaces
   re_rassor_cartography
 )
@@ -76,9 +99,8 @@ install(
   RUNTIME DESTINATION bin
 )
 
-install(TARGETS pathsmooth_cli
+install(TARGETS pathsmooth_cli routing_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
-
 
 ament_package()

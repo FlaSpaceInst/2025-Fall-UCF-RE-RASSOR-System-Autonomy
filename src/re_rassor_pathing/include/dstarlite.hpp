@@ -1,89 +1,31 @@
+#ifndef DSTARLITE_HPP
+#define DSTARLITE_HPP
+
 #pragma once
 
 #include <unordered_map>
 #include <queue>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include "state.hpp"
 #include "quadtree_costmap.hpp"
+#include "pathsmooth.hpp"
+#include <unordered_set>
 
-namespace dstarlite {
+using namespace dstarlite;
 
 class DStarLite {
 public:
-    DStarLite(int w, int h,
-              const QuadtreeCostmapAdapter& cm)
+    DStarLite(int w, int h, QuadtreeCostmapAdapter& cm)
     : width_(w), height_(h), cm_(cm)
     {}
+    void initialize(State start, State goal);
+    void updateMap(const std::vector<std::pair<int, int>>& obstacles);
 
-    void initialize(State start, State goal) {
-        start_ = start;
-        goal_  = goal;
-        km_ = 0.0;
-        g_.clear();
-        rhs_.clear();
+    bool computePath();
 
-        rhs_[goal] = 0.0;
-        g_[goal]   = INF();
-
-        U_ = PQ(Cmp{this});
-        U_.push(PQItem{goal, calculateKey(goal)});
-        last_ = start;
-    }
-
-    bool computePath() {
-        while (!U_.empty() &&
-               (U_.top().key < calculateKey(start_) ||
-                rhsValue(start_) != gValue(start_)))
-        {
-            auto u = U_.top().state;
-            Key k_old = U_.top().key;
-            Key k_new = calculateKey(u);
-            U_.pop();
-
-            if (k_old < k_new) {
-                U_.push({u, k_new});
-            } else if (gValue(u) > rhsValue(u)) {
-                g_[u] = rhsValue(u);
-                for (auto& s : neighbors(u)) updateVertex(s);
-            } else {
-                double g_old = gValue(u);
-                g_[u] = INF();
-                for (auto& s : neighbors(u)) updateVertex(s);
-                updateVertex(u);
-            }
-        }
-        return std::isfinite(gValue(start_));
-    }
-
-    std::vector<State> extractPath() const {
-        std::vector<State> path;
-        if (!std::isfinite(gValue(start_))) return path;
-
-        State s = start_;
-        path.push_back(s);
-
-        for (int k = 0; k < width_ * height_; ++k) {
-            if (s == goal_) break;
-
-            auto nbrs = neighbors(s);
-            double best = INF();
-            State best_s = s;
-
-            for (auto& n : nbrs) {
-                double c = cost(s, n);
-                if (!std::isfinite(c)) continue;
-                double v = gValue(n) + c;
-                if (v < best) { best = v; best_s = n; }
-            }
-
-            if (best_s == s) break;
-            s = best_s;
-            path.push_back(s);
-        }
-
-        return path;
-    }
+    int extractPath(std::vector<Pt> &waypoints);
 
 private:
     struct PQItem {
@@ -100,11 +42,12 @@ private:
     };
 
     using PQ = std::priority_queue<PQItem, std::vector<PQItem>, Cmp>;
+    std::unordered_set<State, StateHash> in_queue_;
 
     double INF() const { return std::numeric_limits<double>::infinity(); }
 
-    double& g_(const State& s) { return g_[s]; }
-    double& rhs_(const State& s) { return rhs_[s]; }
+    double& gRef_(const State& s) { return g_[s]; }
+    double& rhsRef_(const State& s) { return rhs_[s]; }
 
     double gValue(const State& s) const {
         auto it = g_.find(s);
@@ -115,55 +58,15 @@ private:
         return it == rhs_.end() ? INF() : it->second;
     }
 
-    Key calculateKey(const State& s) const {
-        double g = gValue(s);
-        double r = rhsValue(s);
-        double m = std::min(g, r);
-        double h = heuristic(start_, s);
-        return Key{m + h + km_, m};
-    }
+    Key calculateKey(const State& s) const;
 
-    void updateVertex(const State& u) {
-        if (u != goal_) {
-            double best = INF();
-            for (auto& s : neighbors(u)) {
-                double c = cost(u, s);
-                best = std::min(best, c + gValue(s));
-            }
-            rhs_[u] = best;
-        }
-        U_.push({u, calculateKey(u)});
-    }
+    void updateVertex(const State& u);
 
-    std::vector<State> neighbors(const State& s) const {
-        static const int dx[4] = {-1, 0, 1, 0};
-        static const int dy[4] = {0, -1, 0, 1};
+    std::vector<State> neighbors(const State& s) const;
 
-        std::vector<State> out;
-        out.reserve(4);
+    double cost(const State& a, const State& b) const;
 
-        for (int k = 0; k < 4; k++) {
-            int nx = s.x + dx[k];
-            int ny = s.y + dy[k];
-
-            if (nx < 0 || ny < 0 || nx >= width_ || ny >= height_) continue;
-
-            if (cm_.isCellOccupied(nx, ny)) continue;
-
-            out.emplace_back(nx, ny);
-        }
-
-        return out;
-    }
-
-    double cost(const State& a, const State& b) const {
-        if (cm_.isCellOccupied(b.x, b.y)) return INF();
-        return 1.0;
-    }
-
-    double heuristic(const State& a, const State& b) const {
-        return std::abs(a.x - b.x) + std::abs(a.y - b.y);
-    }
+    double heuristic(const State& a, const State& b) const;
 
 private:
     int width_;
@@ -174,11 +77,13 @@ private:
     State goal_;
     State last_;
 
-    const QuadtreeCostmapAdapter& cm_;
+    QuadtreeCostmapAdapter& cm_;
 
     std::unordered_map<State, double, StateHash> g_;
     std::unordered_map<State, double, StateHash> rhs_;
     PQ U_{Cmp{this}};
 };
 
-} // namespace dstarlite
+void PointToWaypoint(Pt& state, geometry_msgs::msg::PoseStamped& pose); 
+
+#endif

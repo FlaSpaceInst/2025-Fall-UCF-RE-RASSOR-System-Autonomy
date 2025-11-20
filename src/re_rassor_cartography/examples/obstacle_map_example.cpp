@@ -2,7 +2,7 @@
 #include <iomanip>
 #include <chrono>
 #include <cmath>
-#include "QuadtreeObstacleMap.h"
+#include "quadtree/QuadtreeObstacleMap.h"
 
 using namespace quadtree;
 

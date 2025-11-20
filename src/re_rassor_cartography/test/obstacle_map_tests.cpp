@@ -1,5 +1,5 @@
 #include "gtest/gtest.h"
-#include "QuadtreeObstacleMap.h"
+#include "quadtree/QuadtreeObstacleMap.h"
 
 using namespace quadtree;
 

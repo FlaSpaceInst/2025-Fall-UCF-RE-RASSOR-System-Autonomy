@@ -1,6 +1,6 @@
 #include <iostream>
 #include <cassert>
-#include "QuadtreeObstacleMap.h"
+#include "quadtree/QuadtreeObstacleMap.h"
 
 using namespace quadtree;
 

@@ -15,6 +15,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(re_rassor_interfaces REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(CURL REQUIRED) 
 
 # Include directories
 include_directories(include)
@@ -40,6 +41,10 @@ ament_target_dependencies(motor_controller
   re_rassor_interfaces
   tf2
   tf2_geometry_msgs
+)
+
+target_link_libraries(motor_controller
+  CURL::libcurl
 )
 
 # Install include directory

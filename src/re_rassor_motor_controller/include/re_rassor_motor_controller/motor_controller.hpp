@@ -9,6 +9,7 @@
  * feedback to integrate with the RE-RASSOR autonomy system.
  */
 
+#include <nlohmann/json.hpp>
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "std_msgs/msg/float64.hpp"
@@ -97,6 +98,7 @@ public:
     bool isRoutineActive() const;
 
 private:
+    std::string server_ip_;
     // Subscriber callbacks for controller server commands
     void wheelInstructionsCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
     void frontArmInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg);
@@ -104,6 +106,7 @@ private:
     void frontDrumInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg);
     void backDrumInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg);
     void routineActionsCallback(const std_msgs::msg::Int8::SharedPtr msg);
+    void sendHttp(const std::string& endpoint, const nlohmann::json& payload);
 
     // Timer callback for odometry updates and status publishing
     void updateOdometry();

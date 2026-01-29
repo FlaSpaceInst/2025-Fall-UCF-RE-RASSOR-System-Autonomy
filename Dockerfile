@@ -10,16 +10,18 @@ RUN apt-get update && apt-get install -y \
     python3-numpy \
     git \
     curl \
+    libcurl4-openssl-dev \
+    nlohmann-json3-dev \
     libgeographiclib-dev \
     lsb-release \
     build-essential \
     ros-${ROS_DISTRO}-nav-msgs \
+    ros-${ROS_DISTRO}-nav2-msgs \
     ros-${ROS_DISTRO}-geometry-msgs \
     ros-${ROS_DISTRO}-std-msgs \
     ros-${ROS_DISTRO}-control-toolbox \
     ros-${ROS_DISTRO}-mavros \
     && rm -rf /var/lib/apt/lists/*
-
 
 RUN mkdir src
 COPY . /src 

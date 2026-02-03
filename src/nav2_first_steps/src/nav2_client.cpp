@@ -11,6 +11,7 @@ Further testing needed.
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include <cmath>
 
 using namespace std::chrono_literals;
 using NavigateToPose = nav2_msgs::action::NavigateToPose;
@@ -107,6 +108,8 @@ int main(int argc, char ** argv)
   auto node = std::make_shared<Nav2Client>();
   
   // Send a goal to position (1.0, 1.0) with 0 yaw
+  // Give Nav2 a moment to fully activate / receive initial pose
+  rclcpp::sleep_for(std::chrono::seconds(2));
   node->send_goal(1.0, 1.0, 0.0);
   
   rclcpp::spin(node);

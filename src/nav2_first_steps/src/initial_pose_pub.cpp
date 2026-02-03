@@ -6,6 +6,7 @@ Further testing needed.
 */
 
 #include <memory>
+#include <cmath>
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 
@@ -45,6 +46,29 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr publisher_;
 };
 
+//testing
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<InitialPosePublisher>();
+
+  int count = 0;
+  auto timer = node->create_wall_timer(
+    std::chrono::milliseconds(500),
+    [node, &count]() {  //mutable
+      node->publish_initial_pose(0.0, 0.0, 0.0);
+      count++;
+      if (count >= 10) {  // publish 10 times
+        rclcpp::shutdown();
+      }
+    });
+
+  rclcpp::spin(node);
+  return 0;
+}
+
+
+/* old main 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
@@ -55,4 +79,4 @@ int main(int argc, char ** argv)
   rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
-}
+}*/

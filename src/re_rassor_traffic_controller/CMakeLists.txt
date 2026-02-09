@@ -18,8 +18,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
-#[[
-Doesn't exist yet
 # Add executable
 add_executable(motor_controller
   src/motor_controller.cpp
@@ -44,7 +42,6 @@ install(TARGETS
   motor_controller
   DESTINATION lib/${PROJECT_NAME}
 )
-  #]]
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

@@ -5,7 +5,7 @@
  * @brief Motor controller that receives commands from the ezrassor_controller_server
  *
  * This node subscribes to command topics published by the controller server
- * and translates them into motor control signals. It also publishes odometry
+ * and translates them into HTTPS motor control signals. It also publishes odometry
  * feedback to integrate with the RE-RASSOR autonomy system.
  */
 
@@ -99,6 +99,8 @@ public:
 
 private:
     std::string server_ip_;
+    int server_port_;
+    
     // Subscriber callbacks for controller server commands
     void wheelInstructionsCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
     void frontArmInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg);

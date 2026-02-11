@@ -15,7 +15,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(re_rassor_interfaces REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(CURL REQUIRED) 
+find_package(CURL REQUIRED)
+find_package(nlohmann_json REQUIRED)  # Added for JSON support
 
 # Include directories
 include_directories(include)
@@ -43,8 +44,10 @@ ament_target_dependencies(motor_controller
   tf2_geometry_msgs
 )
 
+# Link libraries
 target_link_libraries(motor_controller
   CURL::libcurl
+  nlohmann_json::nlohmann_json  # Added JSON library
 )
 
 # Install include directory

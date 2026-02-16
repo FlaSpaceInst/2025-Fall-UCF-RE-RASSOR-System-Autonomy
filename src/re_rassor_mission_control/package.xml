@@ -24,16 +24,3 @@
     <build_type>ament_cmake</build_type>
   </export>
 </package>
-```
-
----
-
-## **4. Directory Structure**
-
-Create your package with this structure:
-```
-ezrassor_mission_control/
-├── CMakeLists.txt
-├── package.xml
-└── src/
-    └── mission_control.cpp

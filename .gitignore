@@ -79,5 +79,7 @@ rosidl_generator*/
 rosidl_typesupport*/ 
 
 
-# FSI Specific 
+# FSI Specific
 ezrassor_controller/
+motor_controller.py
+src/re_rassor_traffic_controller/src/

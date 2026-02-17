@@ -79,6 +79,11 @@ rosidl_generator*/
 rosidl_typesupport*/ 
 
 
+# FSI Specific 
+ezrassor_controller/
+
+#notes or any other files
+notes.txt
 # FSI Specific
 ezrassor_controller/
 motor_controller.py

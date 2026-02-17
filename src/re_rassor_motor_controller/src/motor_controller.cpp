@@ -22,7 +22,7 @@ MotorController::MotorController()
   commands_active_(false)
 {
     // Declare parameters
-    this->declare_parameter("server_ip", "host.docker.internal");
+    this->declare_parameter("server_ip", "0.0.0.0");
     this->declare_parameter("server_port", 5001);
     this->declare_parameter("wheel_base", 0.5);
     this->declare_parameter("max_linear_velocity", 1.0);

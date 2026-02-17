@@ -84,3 +84,7 @@ ezrassor_controller/
 
 #notes or any other files
 notes.txt
+# FSI Specific
+ezrassor_controller/
+motor_controller.py
+src/re_rassor_traffic_controller/src/

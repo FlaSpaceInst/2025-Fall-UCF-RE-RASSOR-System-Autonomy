@@ -1,4 +1,14 @@
-"""Launch robot_state_publisher with EZRASSOR URDF."""
+"""
+Launch robot_state_publisher with the EZRASSOR URDF.
+
+Processes the ezrassor.urdf.xacro and publishes the full TF tree:
+  base_footprint -> base_link -> camera_link -> camera_depth_frame
+                                             -> camera_color_frame
+                                             -> laser_frame (virtual)
+
+Primary sensor: Orbbec Astra Pro 3D depth camera (no physical LiDAR).
+The virtual laser_frame is used by depthimage_to_laserscan for /scan output.
+"""
 
 import os
 from launch import LaunchDescription

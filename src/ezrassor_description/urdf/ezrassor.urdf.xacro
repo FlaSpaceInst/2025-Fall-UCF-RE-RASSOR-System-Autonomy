@@ -1,7 +1,15 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ezrassor">
 
-  <!-- TF Tree: base_footprint -> base_link -> laser_frame -->
+  <!--
+    TF Tree:
+      base_footprint -> base_link -> camera_link -> camera_depth_frame
+                                                 -> camera_color_frame
+                                  -> laser_frame (virtual, same position as camera_depth_frame)
+
+    Primary sensor: Orbbec Astra Pro 3D Depth Camera
+    No physical LiDAR — /scan is generated via depthimage_to_laserscan
+  -->
 
   <!-- Robot parameters -->
   <xacro:property name="body_length" value="0.6"/>
@@ -9,15 +17,16 @@
   <xacro:property name="body_height" value="0.3"/>
   <xacro:property name="ground_clearance" value="0.15"/>
 
-  <!-- LiDAR position relative to base_link -->
-  <xacro:property name="lidar_x" value="0.0"/>
-  <xacro:property name="lidar_y" value="0.0"/>
-  <xacro:property name="lidar_z" value="0.25"/>
+  <!-- Depth camera position relative to base_link (front-mounted) -->
+  <xacro:property name="camera_x" value="0.3"/>
+  <xacro:property name="camera_y" value="0.0"/>
+  <xacro:property name="camera_z" value="0.1"/>
 
+
+  <!-- ==================== Base ==================== -->
 
   <!-- Base footprint: ground-level frame for NAV2 -->
   <link name="base_footprint"/>
-
 
   <!-- Base link: main robot body -->
   <link name="base_link">
@@ -46,27 +55,9 @@
   </joint>
 
 
-  <!-- LiDAR: RPLidar A1 (frame_id must match driver config) -->
-  <link name="laser_frame">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="0.04" length="0.04"/>
-      </geometry>
-      <material name="black">
-        <color rgba="0.1 0.1 0.1 1.0"/>
-      </material>
-    </visual>
-  </link>
+  <!-- ==================== Depth Camera (Orbbec Astra Pro) ==================== -->
 
-  <joint name="laser_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="laser_frame"/>
-    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z}" rpy="0 0 0"/>
-  </joint>
-
-
-  <!-- Depth camera placeholder (Orbbec Astra Pro Plus)
+  <!-- Camera body: front-mounted on the rover -->
   <link name="camera_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -82,16 +73,43 @@
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
-    <origin xyz="0.3 0 0.1" rpy="0 0 0"/>
+    <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 0 0"/>
   </joint>
 
+  <!-- Depth optical frame (used by OrbbecSDK_ROS2 driver) -->
+  <!-- Optical frame convention: Z forward, X right, Y down -->
   <link name="camera_depth_frame"/>
 
   <joint name="camera_depth_joint" type="fixed">
     <parent link="camera_link"/>
     <child link="camera_depth_frame"/>
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <!-- Color optical frame (for YOLO / RGB processing) -->
+  <link name="camera_color_frame"/>
+
+  <joint name="camera_color_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_color_frame"/>
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+
+  <!-- ==================== Virtual Laser Frame ==================== -->
+
+  <!--
+    laser_frame: virtual frame at the camera position.
+    depthimage_to_laserscan publishes /scan referenced to this frame.
+    Kept as a separate link so downstream nodes (rf2o, NAV2 costmap)
+    can reference "laser_frame" without knowing it comes from a camera.
+  -->
+  <link name="laser_frame"/>
+
+  <joint name="laser_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="laser_frame"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
-  -->
 
 </robot>

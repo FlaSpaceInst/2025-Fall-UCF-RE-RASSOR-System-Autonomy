@@ -21,6 +21,9 @@ ament_target_dependencies(nav2_client
   rclcpp_action
   nav2_msgs
   geometry_msgs
+  std_msgs #added from here
+  tf2
+  tf2_geometry_msgs
 )
 
 # Build initial_pose_pub executable
@@ -46,6 +49,7 @@ endif()
 install(TARGETS
   nav2_client
   initial_pose_pub
+  mission_control #added
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,101 @@
+cmake_minimum_required(VERSION 3.8)
+project(ezrassor_nav2)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# ─── Find dependencies ────────────────────────────────────────────────────────
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(re_rassor_interfaces REQUIRED)
+
+# ─── nav2_bridge_node ─────────────────────────────────────────────────────────
+# Main node: subscribes to Nav2 topics, streams over WebSocket to React app,
+# and forwards drive commands to the motor controller.
+add_executable(nav2_bridge_node
+  src/nav2_bridge_node.cpp
+  src/websocket_server.cpp
+  src/map_serializer.cpp
+  src/command_router.cpp
+)
+
+target_include_directories(nav2_bridge_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+ament_target_dependencies(nav2_bridge_node
+  rclcpp
+  rclcpp_action
+  std_msgs
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  nav2_msgs
+  nav2_util
+  re_rassor_interfaces
+)
+
+# Link against system websocketpp / boost (installed separately)
+# If you use uWebSockets or libwebsockets, swap these lines accordingly.
+find_package(Boost REQUIRED COMPONENTS system thread)
+target_link_libraries(nav2_bridge_node Boost::system Boost::thread pthread)
+
+# ─── goal_relay_node ──────────────────────────────────────────────────────────
+# Thin relay: takes GoalPosition msgs from GUI and sends Nav2 NavigateToPose.
+add_executable(goal_relay_node
+  src/goal_relay_node.cpp
+)
+
+target_include_directories(goal_relay_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+ament_target_dependencies(goal_relay_node
+  rclcpp
+  rclcpp_action
+  geometry_msgs
+  nav2_msgs
+  re_rassor_interfaces
+)
+
+# ─── Install ──────────────────────────────────────────────────────────────────
+install(TARGETS
+  nav2_bridge_node
+  goal_relay_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY include/
+  DESTINATION include
+)
+
+# ─── Tests ────────────────────────────────────────────────────────────────────
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()

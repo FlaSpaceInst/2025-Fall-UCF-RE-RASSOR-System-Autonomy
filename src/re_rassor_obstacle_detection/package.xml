@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>re_rassor_obstacle_detection</name>
+  <version>0.0.0</version>
+  <description>Depth costmap publisher</description>
+
+  <maintainer email="you@todo.com">you</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>curl</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

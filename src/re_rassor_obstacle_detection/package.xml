@@ -1,19 +1,31 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>re_rassor_obstacle_detection</name>
-  <version>0.0.0</version>
-  <description>Depth costmap publisher</description>
+  <version>0.0.1</version>
+  <description>Depth + RGB + LaserScan + Costmap pipeline</description>
 
   <maintainer email="you@todo.com">you</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <!-- Core -->
   <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
 
-  <exec_depend>curl</exec_depend>
+  <!-- TF -->
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_sensor_msgs</depend>
+
+  <!-- RViz -->
+  <exec_depend>rviz2</exec_depend>
+
+  <!-- CURL -->
+  <exec_depend>libcurl4</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for motor_controller - runs inside Docker container
+Test script for motor_controller
 Launches the motor_controller node and publishes ROS2 messages to test the HTTP POST bridge
 """
 
@@ -19,12 +19,10 @@ class MotorControllerTester(Node):
     def __init__(self):
         super().__init__('motor_controller_tester')
         
-        # Motor controller process
         self.motor_controller_process = None
         self.output_thread = None
         self.running = True
-        
-        # Create publishers for all motor controller topics
+       
         self.wheel_pub = self.create_publisher(
             Twist, '/ezrassor/wheel_instructions', 10)
         self.front_arm_pub = self.create_publisher(
@@ -148,15 +146,15 @@ class MotorControllerTester(Node):
             all_found = True
             for topic in expected_topics:
                 if topic in active_topics:
-                    self.get_logger().info(f'✓ Topic exists: {topic}')
+                    self.get_logger().info(f'Topic exists: {topic}')
                 else:
-                    self.get_logger().error(f'✗ Topic NOT found: {topic}')
+                    self.get_logger().error(f'Topic NOT found: {topic}')
                     all_found = False
             
             if all_found:
-                self.get_logger().info('✓ All expected topics exist')
+                self.get_logger().info('All expected topics exist')
             else:
-                self.get_logger().error('✗ Some topics are missing')
+                self.get_logger().error('Some topics are missing')
             
             return all_found
             
@@ -176,7 +174,7 @@ class MotorControllerTester(Node):
             if (self.wheel_pub.get_subscription_count() > 0 and
                 self.front_arm_pub.get_subscription_count() > 0 and
                 self.back_arm_pub.get_subscription_count() > 0):
-                self.get_logger().info('✓ Publishers connected to motor_controller')
+                self.get_logger().info('Publishers connected to motor_controller')
                 return True
             time.sleep(0.1)
         
@@ -192,7 +190,7 @@ class MotorControllerTester(Node):
             self.motor_controller_process.terminate()
             try:
                 self.motor_controller_process.wait(timeout=3)
-                self.get_logger().info('✓ motor_controller stopped cleanly')
+                self.get_logger().info('motor_controller stopped cleanly')
             except subprocess.TimeoutExpired:
                 self.get_logger().warn('Force killing motor_controller...')
                 self.motor_controller_process.kill()
@@ -592,11 +590,11 @@ def main(args=None):
         tester.destroy_node()
         rclpy.shutdown()
         
-        print('\n✓ Test script completed successfully')
+        print('\nTest script completed successfully')
         return 0
         
     except Exception as e:
-        print(f'\n✗ Test failed with error: {e}')
+        print(f'\nTest failed with error: {e}')
         tester.stop_motor_controller()
         tester.destroy_node()
         rclpy.shutdown()

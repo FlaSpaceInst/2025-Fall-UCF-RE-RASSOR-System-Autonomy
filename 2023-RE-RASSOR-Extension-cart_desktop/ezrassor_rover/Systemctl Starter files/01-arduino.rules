@@ -1,2 +1,0 @@
-SUBSYSTEM=="tty" KERNELS=="1-2" SYMLINK+="arduino_wheel" TAG+="systemd" ENV{SYSTEM_WANTS}="ros2-start-forwarder.service"
-SUBSYSTEM=="tty" KERNELS=="1-1.1" SYMLINK+="arduino_drum" TAG+="systemd" ENV{SYSTEM_WANTS}="ros2-start-forwarder.service"

@@ -1,8 +1,0 @@
-{
-  "dependencies": {
-    "expo": "^51.0.32"
-  },
-  "devDependencies": {
-    "electron": "^40.4.1"
-  }
-}

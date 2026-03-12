@@ -1,7 +1,0 @@
-# Ignore files ending with .log
-*log
-*Identifier
-*node_modules
-*.expo
-*build
-*install

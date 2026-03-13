@@ -1,0 +1,10 @@
+[Unit]
+description=Starts ROS2 nodes automatically
+
+[Service]
+User=root
+Group=root
+ExecStart=/etc/systemd/user/ros2_start.sh
+
+[Install]
+WantedBy=multi-user.target

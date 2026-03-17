@@ -4,6 +4,7 @@
 build/
 install/
 log/
+out/
 
 # Ament / CMake
 ament_ws/
@@ -78,6 +79,13 @@ $RECYCLE.BIN/
 rosidl_generator*/ 
 rosidl_typesupport*/ 
 
-
+*.zip
 # FSI Specific 
-ezrassor_controller/
+#ezrassor_controller/
+
+#notes or any other files
+notes.txt
+# FSI Specific
+#ezrassor_controller/
+motor_controller.py
+src/re_rassor_traffic_controller/src/

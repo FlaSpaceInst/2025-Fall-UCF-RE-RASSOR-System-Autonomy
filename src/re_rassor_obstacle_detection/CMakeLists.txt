@@ -20,7 +20,9 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 
-find_package(CURL REQUIRED)
+# libwebsockets replaces CURL for the WebSocket depth receiver
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBWEBSOCKETS REQUIRED libwebsockets)
 
 # ======================
 # Depth + PointCloud Node
@@ -41,8 +43,12 @@ ament_target_dependencies(depth_costmap_node
   tf2_sensor_msgs
 )
 
+target_include_directories(depth_costmap_node PRIVATE
+  ${LIBWEBSOCKETS_INCLUDE_DIRS}
+)
+
 target_link_libraries(depth_costmap_node
-  CURL::libcurl
+  ${LIBWEBSOCKETS_LIBRARIES}
 )
 
 # ======================
@@ -59,6 +65,8 @@ ament_target_dependencies(scan_to_costmap_node
   nav_msgs
   std_msgs
   geometry_msgs
+  tf2
+  tf2_ros
 )
 
 # ======================
@@ -72,8 +80,9 @@ install(TARGETS
 )
 
 install(
-  DIRECTORY launch rviz
+  DIRECTORY launch rviz config
   DESTINATION share/${PROJECT_NAME}
+  OPTIONAL
 )
 
 ament_package()

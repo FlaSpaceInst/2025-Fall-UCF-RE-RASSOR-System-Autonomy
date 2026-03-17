@@ -17,13 +17,9 @@
  *   /odometry/wheel                   (nav_msgs/Odometry)
  *   /location_status                  (re_rassor_interfaces/LocationStatus)
  *   /motor_controller/status          (std_msgs/Int8)
- *   odom → base_link TF               (tf2_ros::TransformBroadcaster)
  *
- * Odometry model:
- *   Skid-steer ICR model (Mandow et al. 2007).
- *   A slip correction factor `skid_correction` (param, default 0.7) compensates
- *   for lateral wheel slip during turns.  Tune against real hardware by
- *   commanding a full 360° rotation and comparing commanded vs actual heading.
+ * NOTE: odom→base_link TF is owned by mission_control (odometry fusion node).
+ *       This node does NOT broadcast any TF transforms.
  */
 
 #include <nlohmann/json.hpp>
@@ -36,13 +32,15 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "re_rassor_interfaces/msg/location_status.hpp"
 
-#include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
-#include <mutex>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 namespace re_rassor {
 
@@ -64,22 +62,20 @@ enum class RoutineAction : int8_t {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MotorState {
-    double linear_velocity   = 0.0;  // m/s  — from last /cmd_vel or wheel_instructions
-    double angular_velocity  = 0.0;  // rad/s
-
-    double front_arm_action  = 0.0;  // -1 lower | 0 stop | 1 raise
+    double linear_velocity   = 0.0;
+    double angular_velocity  = 0.0;
+    double front_arm_action  = 0.0;
     double back_arm_action   = 0.0;
-    double front_drum_action = 0.0;  // -1 dump  | 0 stop | 1 dig
+    double front_drum_action = 0.0;
     double back_drum_action  = 0.0;
-
-    int8_t active_routine    = 0;    // 0 = none
+    int8_t active_routine    = 0;
 };
 
 struct OdometryState {
-    double x        = 0.0;   // metres, map origin
+    double x        = 0.0;
     double y        = 0.0;
-    double theta    = 0.0;   // radians, normalised to [-π, π]
-    double velocity = 0.0;   // effective linear speed (m/s)
+    double theta    = 0.0;
+    double velocity = 0.0;
     rclcpp::Time last_update;
 };
 
@@ -91,64 +87,39 @@ class MotorController : public rclcpp::Node
 {
 public:
     MotorController();
-    ~MotorController() = default;
+    ~MotorController();   // joins the HTTP worker thread
 
-    // Thread-safe state accessors
     MotorState    getMotorState()    const;
     OdometryState getOdometryState() const;
 
-    // Sends zero-velocity to hardware immediately
     void emergencyStop();
-
     bool isRoutineActive() const;
 
 private:
-    // ── ROS parameters ────────────────────────────────────────────────────────
+    // ── Parameters ────────────────────────────────────────────────────────────
     std::string server_ip_;
     int         server_port_;
-
-    double      wheel_base_;            // lateral distance between wheel centrelines (m)
-    double      max_linear_velocity_;   // m/s
-    double      max_angular_velocity_;  // rad/s
-    double      update_rate_;           // odometry timer frequency (Hz)
-    std::string rover_namespace_;       // topic namespace prefix
-    double      command_timeout_;       // seconds before auto-stop
-
-    /**
-     * Skid-steer ICR slip correction factor.
-     *
-     * Range 0.0–1.0.  Compensates for lateral wheel slip on turns:
-     *   1.0 = no correction (behaves like pure diff-drive, will drift)
-     *   0.7 = good starting point for hard surfaces
-     *   0.4 = loose terrain (sand, gravel)
-     *
-     * Tune by commanding a 360° in-place spin and comparing the
-     * odometry-reported heading change to the actual change.
-     *   b ≈ actual_degrees / commanded_degrees
-     */
-    double skid_correction_;
+    double      wheel_base_;
+    double      max_linear_velocity_;
+    double      max_angular_velocity_;
+    double      update_rate_;
+    std::string rover_namespace_;
+    double      command_timeout_;
+    double      skid_correction_;
 
     // ── Subscribers ───────────────────────────────────────────────────────────
-
-    /// Nav2 controller output — primary velocity source when Nav2 is active
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
-
-    /// Legacy direct wheel commands (teleop / manual override)
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr wheel_instructions_sub_;
-
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr front_arm_instructions_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr back_arm_instructions_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr front_drum_instructions_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr back_drum_instructions_sub_;
-    rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr    routine_actions_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr    front_arm_instructions_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr    back_arm_instructions_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr    front_drum_instructions_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr    back_drum_instructions_sub_;
+    rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr       routine_actions_sub_;
 
     // ── Publishers ────────────────────────────────────────────────────────────
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr                   wheel_odom_pub_;
     rclcpp::Publisher<re_rassor_interfaces::msg::LocationStatus>::SharedPtr location_status_pub_;
     rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr                       controller_status_pub_;
-
-    // ── TF broadcaster ────────────────────────────────────────────────────────
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     // ── Timer ─────────────────────────────────────────────────────────────────
     rclcpp::TimerBase::SharedPtr update_timer_;
@@ -157,7 +128,6 @@ private:
     MotorState         motor_state_;
     OdometryState      odometry_state_;
     mutable std::mutex state_mutex_;
-
     rclcpp::Time       last_command_time_;
     std::atomic<bool>  commands_active_;
 
@@ -170,26 +140,29 @@ private:
     void backDrumInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg);
     void routineActionsCallback(const std_msgs::msg::Int8::SharedPtr msg);
 
-    // ── Odometry + TF ─────────────────────────────────────────────────────────
+    // ── Odometry ──────────────────────────────────────────────────────────────
     void updateOdometry();
-    void broadcastOdomTF(const rclcpp::Time& stamp);
     void publishWheelOdometry(const rclcpp::Time& stamp);
     void publishLocationStatus();
 
-    // ── Hardware bridge ───────────────────────────────────────────────────────
+    // ── Async HTTP bridge ─────────────────────────────────────────────────────
+    // sendHttp() enqueues the payload and returns immediately (non-blocking).
+    // httpWorker() runs on a dedicated thread and drains the queue.
     void sendHttp(const nlohmann::json& payload);
+    void httpWorker();
 
-    /**
-     * Single entry point for all wheel velocity commands.
-     * Called by both cmdVelCallback and wheelInstructionsCallback so
-     * both sources use identical clamping and HTTP forwarding.
-     */
+    std::thread              http_worker_thread_;
+    std::atomic<bool>        http_worker_running_{false};
+    std::deque<std::string>  http_queue_;
+    std::mutex               http_queue_mutex_;
+    std::condition_variable  http_queue_cv_;
+
+    // ── Command helpers ───────────────────────────────────────────────────────
     void applyWheelCommands(double linear_x, double angular_z);
     void applyArmCommand(const std::string& arm, double action);
     void applyDrumCommand(const std::string& drum, double action);
     void executeRoutine(int8_t routine);
 
-    // ── Utility ───────────────────────────────────────────────────────────────
     static double normalizeAngle(double angle);
 };
 

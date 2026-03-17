@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # Find dependencies
+find_package(std_srvs REQUIRED)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -42,6 +43,7 @@ ament_target_dependencies(motor_controller
   re_rassor_interfaces
   tf2
   tf2_geometry_msgs
+  std_srvs
 )
 
 # Link libraries

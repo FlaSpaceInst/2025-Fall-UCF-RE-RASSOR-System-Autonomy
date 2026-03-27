@@ -53,12 +53,20 @@ add_executable(navigate_cli src/navigate_cli.cpp)
 ament_target_dependencies(navigate_cli ${DEPS})
 
 # ======================
+# follow_waypoints_cli tool
+# ======================
+
+add_executable(follow_waypoints_cli src/follow_waypoints_cli.cpp)
+ament_target_dependencies(follow_waypoints_cli ${DEPS})
+
+# ======================
 # Install
 # ======================
 
 install(TARGETS
   mission_control
   navigate_cli
+  follow_waypoints_cli
   DESTINATION lib/${PROJECT_NAME}
 )
 

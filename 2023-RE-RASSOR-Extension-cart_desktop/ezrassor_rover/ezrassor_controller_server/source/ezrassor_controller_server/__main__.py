@@ -7,6 +7,7 @@ import ezrassor_controller_server as server
 import geometry_msgs.msg
 import rclpy
 import std_msgs.msg
+import std_srvs.srv
 import sys
 from flask import Flask, request, Response, stream_with_context, render_template, jsonify
 from flask_cors import CORS # Import CORS
@@ -45,7 +46,7 @@ def get_ip_address():
         formatted_ip =  "ip_" + ip_address.replace(".", "_")
         return formatted_ip
     except Exception as e:
-        self.get_logger().error(f"Error finding IP for potato: {e}")
+        print(f"Error finding IP for potato: {e}")
         return None  # Return None or a default value
 
 class CommandStatusSubscriber(Node):
@@ -136,6 +137,12 @@ def main(passed_args=None):
             IMAGE_RAW_TOPIC,
             QUEUE_SIZE,
         )
+
+        # Calibrate service client (for mission controller /calibrate endpoint)
+        calibrate_client = node.create_client(std_srvs.srv.Trigger, '/re_rassor/calibrate')
+        if not calibrate_client.wait_for_service(timeout_sec=5.0):
+            node.get_logger().warn("Calibrate service /re_rassor/calibrate not available yet")
+
         # End of unimplemented logic
 
         def process_request(request):
@@ -243,6 +250,49 @@ def main(passed_args=None):
                 node.get_logger().error(str(error))
 
                 return {"status": 400}
+
+        @app.route("/navigate", methods=["POST"])
+        def navigate():
+            """Mission controller endpoint: proceed to given rover-relative goal."""
+            payload = request.get_json(force=True)
+            if payload is None:
+                return jsonify({"error": "missing or invalid json"}), 400
+
+            if "x" not in payload or "y" not in payload:
+                return jsonify({"error": "missing x or y in payload"}), 400
+
+            try:
+                x = float(payload["x"])
+                y = float(payload["y"])
+                theta = float(payload.get("theta", 0.0))
+            except (TypeError, ValueError) as e:
+                return jsonify({"error": f"invalid numeric value: {e}"}), 400
+
+            # Reuse existing command processing path for autonomy coordinates.
+            try:
+                process_request({"target_coordinate": {"x": x, "y": y}})
+            except server.VerificationError as error:
+                node.get_logger().error(f"/navigate verification failed: {error}")
+                return jsonify({"error": str(error)}), 400
+
+            # Include theta for compatibility; mission control can use this field if needed.
+            return jsonify({"status": "navigate_request_sent", "x": x, "y": y, "theta": theta}), 200
+
+        @app.route("/calibrate", methods=["POST"])
+        def calibrate():
+            """Mission controller endpoint: trigger calibration service."""
+            if not calibrate_client.service_is_ready():
+                return jsonify({"error": "calibrate service /re_rassor/calibrate unavailable"}), 503
+
+            req = std_srvs.srv.Trigger.Request()
+            future = calibrate_client.call_async(req)
+            rclpy.spin_until_future_complete(node, future, timeout_sec=10.0)
+            result = future.result()
+
+            if result is None:
+                return jsonify({"error": "calibrate call failed"}), 500
+
+            return jsonify({"success": result.success, "message": result.message}), 200
 
         @app.after_request
         def apply_cors_headers(response):

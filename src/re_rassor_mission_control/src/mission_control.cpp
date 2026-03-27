@@ -110,12 +110,16 @@ public:
         // Visual odom weight in [0,1] — how much to trust rtabmap vs wheels
         // 0.0 = wheel only,  1.0 = visual only,  0.3 = mostly wheels + visual correction
         declare_parameter("visual_weight",     0.3);
+        declare_parameter("pre_navigation_rotate", true);
+        declare_parameter("pre_navigation_rotation_threshold", 0.15);
         declare_parameter("nav2_action",       std::string("navigate_to_pose"));
 
         wheel_odom_topic_  = get_parameter("wheel_odom_topic").as_string();
         visual_odom_topic_ = get_parameter("visual_odom_topic").as_string();
         fused_odom_topic_  = get_parameter("fused_odom_topic").as_string();
         visual_weight_     = get_parameter("visual_weight").as_double();
+        pre_navigation_rotate_ = get_parameter("pre_navigation_rotate").as_bool();
+        pre_navigation_rotation_threshold_ = get_parameter("pre_navigation_rotation_threshold").as_double();
 
         // ── TF broadcaster for fused odom → base_link ────────────────────
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -218,6 +222,8 @@ private:
     std::string visual_odom_topic_;
     std::string fused_odom_topic_;
     double      visual_weight_;
+    bool        pre_navigation_rotate_ = true;
+    double      pre_navigation_rotation_threshold_ = 0.15;
 
     // ── ROS handles ───────────────────────────────────────────────────────
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_sub_;
@@ -499,9 +505,9 @@ private:
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Navigate to a pose in the MAP frame (what Nav2 understands)
+    // Send a NavigateToPose goal to Nav2 and wait for result.
     // ─────────────────────────────────────────────────────────────────────
-    bool navigateMap(double x, double y, double yaw)
+    bool sendNav2Goal(double x, double y, double yaw)
     {
         if (!nav_client_->wait_for_action_server(3s)) {
             RCLCPP_ERROR(get_logger(), "Nav2 action server not available");
@@ -518,8 +524,7 @@ private:
         q.setRPY(0.0, 0.0, yaw);
         goal.pose.pose.orientation = tf2::toMsg(q);
 
-        RCLCPP_INFO(get_logger(),
-            "Navigating to map (%.3f, %.3f, %.3f rad)", x, y, yaw);
+        RCLCPP_INFO(get_logger(), "Nav2 goal: (%.3f, %.3f, %.3f rad)", x, y, yaw);
 
         auto opts = rclcpp_action::Client<NavigateToPose>::SendGoalOptions();
         opts.feedback_callback =
@@ -530,7 +535,6 @@ private:
             };
 
         auto goal_future = nav_client_->async_send_goal(goal, opts);
-
         if (rclcpp::spin_until_future_complete(
                 get_node_base_interface(), goal_future) !=
             rclcpp::FutureReturnCode::SUCCESS)
@@ -569,6 +573,48 @@ private:
             RCLCPP_ERROR(get_logger(), "Unknown Nav2 result code");
             return false;
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Optional pre-navigation rotation: rotate in place to the target yaw
+    // before moving to the goal pose.
+    // ─────────────────────────────────────────────────────────────────────
+    bool preRotateIfNeeded(double x, double y, double yaw)
+    {
+        if (!pre_navigation_rotate_) {
+            return true;
+        }
+
+        Pose2D current;
+        {
+            std::lock_guard<std::mutex> lock(odom_mutex_);
+            current = fused_pose_;
+        }
+
+        const double yaw_diff = normalizeAngle(yaw - current.yaw);
+        if (std::fabs(yaw_diff) < pre_navigation_rotation_threshold_) {
+            RCLCPP_INFO(get_logger(), "Pre-rotation not needed (%.3f rad diff)", yaw_diff);
+            return true;
+        }
+
+        RCLCPP_INFO(get_logger(),
+            "Pre-rotation: rotating in place from %.3f to %.3f (diff %.3f)",
+            current.yaw, yaw, yaw_diff);
+
+        return sendNav2Goal(current.x, current.y, yaw);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Navigate to a pose in the MAP frame (what Nav2 understands)
+    // ─────────────────────────────────────────────────────────────────────
+    bool navigateMap(double x, double y, double yaw)
+    {
+        if (!preRotateIfNeeded(x, y, yaw)) {
+            RCLCPP_ERROR(get_logger(), "Pre-rotation failed, aborting navigation");
+            return false;
+        }
+
+        return sendNav2Goal(x, y, yaw);
     }
 };
 

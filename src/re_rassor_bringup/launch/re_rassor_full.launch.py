@@ -163,6 +163,8 @@ def generate_launch_description():
                 "wheel_odom_topic":  "/odometry/wheel",
                 "visual_odom_topic": "/odom",
                 "fused_odom_topic":  "/odometry/fused",
+                "navigate_topic":     "/navigate",
+                "calibrate_topic":    "/calibrate",
                 "visual_weight":     0.0,   # wheel-only: no visual correction
             }],
         )],

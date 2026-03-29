@@ -303,7 +303,7 @@ private:
     // Publish fused odometry
     // ─────────────────────────────────────────────────────────────────────
     void publishFusedOdom(const rclcpp::Time& stamp,
-                          const geometry_msgs::msg::Twist& twist)
+                      const geometry_msgs::msg::Twist& twist)
     {
         nav_msgs::msg::Odometry msg;
         msg.header.stamp    = stamp;
@@ -317,13 +317,25 @@ private:
         q.setRPY(0.0, 0.0, fused_pose_.yaw);
         msg.pose.pose.orientation = tf2::toMsg(q);
 
-        msg.twist = nav_msgs::msg::Odometry().twist;  // zero — fused doesn't have velocity
         msg.twist.twist = twist;
 
-        // Covariance: fused is more accurate than wheel alone
-        msg.pose.covariance[0]  = 0.005;
-        msg.pose.covariance[7]  = 0.005;
-        msg.pose.covariance[35] = 0.02;
+        // Pose covariance (row-major 6x6: x, y, z, roll, pitch, yaw)
+        // Measured axes — tuned for fused wheel+visual odometry
+        msg.pose.covariance[0]  = 0.005;   // x
+        msg.pose.covariance[7]  = 0.005;   // y
+        msg.pose.covariance[35] = 0.02;    // yaw
+        // Unmeasured axes — set large finite value, NOT zero (1/0 = inf crashes RTAB-Map)
+        msg.pose.covariance[14] = 9999.0;  // z
+        msg.pose.covariance[21] = 9999.0;  // roll
+        msg.pose.covariance[28] = 9999.0;  // pitch
+
+        // Twist covariance — same convention
+        msg.twist.covariance[0]  = 0.001;  // vx
+        msg.twist.covariance[7]  = 0.001;  // vy
+        msg.twist.covariance[35] = 0.05;   // vyaw
+        msg.twist.covariance[14] = 9999.0; // vz
+        msg.twist.covariance[21] = 9999.0; // vroll
+        msg.twist.covariance[28] = 9999.0; // vpitch
 
         fused_odom_pub_->publish(msg);
     }

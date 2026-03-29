@@ -22,18 +22,16 @@ find_package(nlohmann_json REQUIRED)  # Added for JSON support
 # Include directories
 include_directories(include)
 
-# Add executable
+# ── motor_controller (HTTP-based, original) ───────────────────────────────────
 add_executable(motor_controller
   src/motor_controller.cpp
 )
 
-# Set include directories for the target
 target_include_directories(motor_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
 
-# Link dependencies
 ament_target_dependencies(motor_controller
   rclcpp
   std_msgs
@@ -46,10 +44,31 @@ ament_target_dependencies(motor_controller
   std_srvs
 )
 
-# Link libraries
 target_link_libraries(motor_controller
   CURL::libcurl
-  nlohmann_json::nlohmann_json  # Added JSON library
+  nlohmann_json::nlohmann_json
+)
+
+# ── serial_motor_controller (serial-hardware, same interface) ─────────────────
+add_executable(serial_motor_controller
+  src/serial_motor_controller.cpp
+)
+
+target_include_directories(serial_motor_controller PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+
+ament_target_dependencies(serial_motor_controller
+  rclcpp
+  std_msgs
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  re_rassor_interfaces
+  tf2
+  tf2_geometry_msgs
+  std_srvs
 )
 
 # Install include directory
@@ -57,9 +76,10 @@ install(DIRECTORY include/
   DESTINATION include/${PROJECT_NAME}
 )
 
-# Install targets
+# Install both executables
 install(TARGETS
   motor_controller
+  serial_motor_controller
   DESTINATION lib/${PROJECT_NAME}
 )
 

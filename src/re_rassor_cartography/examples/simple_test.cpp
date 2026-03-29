@@ -1,8 +1,27 @@
+// Copyright 2025 UCF RE-RASSOR
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 #include <iostream>
 #include <cassert>
 #include "quadtree/QuadtreeObstacleMap.h"
 
-using namespace quadtree;
+using quadtree::QuadtreeObstacleMap;
 
 int main()
 {
@@ -35,7 +54,8 @@ int main()
 
     std::cout << "  Removed: " << (removed ? "YES" : "NO") << " ✓\n";
     std::cout << "  Count after removal: " << map.getObstacleCount() << " ✓\n";
-    std::cout << "  Position (25, 25) now: " << (map.isAreaObstructed(25.0f, 25.0f) ? "OBSTRUCTED" : "CLEAR") << " ✓\n\n";
+    bool clearedPos = map.isAreaObstructed(25.0f, 25.0f);
+    std::cout << "  Position (25, 25) now: " << (clearedPos ? "OBSTRUCTED" : "CLEAR") << " ✓\n\n";
     assert(removed == true);
     assert(map.getObstacleCount() == 1);
 
@@ -55,9 +75,12 @@ int main()
     robotMap.addObstacle(0.0f, -5.0f);
 
     std::cout << "  Robot world: 20x20 with " << robotMap.getObstacleCount() << " obstacles\n";
-    std::cout << "  Position (0, 0): " << (robotMap.isAreaObstructed(0, 0) ? "OBSTRUCTED" : "CLEAR") << "\n";
-    std::cout << "  Position (5, 5): " << (robotMap.isAreaObstructed(5, 5) ? "OBSTRUCTED" : "CLEAR") << " ✓\n";
-    std::cout << "  Position (10, 10): " << (robotMap.isAreaObstructed(10, 10) ? "OBSTRUCTED" : "CLEAR") << " ✓\n\n";
+    std::cout << "  Position (0, 0): "
+              << (robotMap.isAreaObstructed(0, 0) ? "OBSTRUCTED" : "CLEAR") << "\n";
+    std::cout << "  Position (5, 5): "
+              << (robotMap.isAreaObstructed(5, 5) ? "OBSTRUCTED" : "CLEAR") << " ✓\n";
+    std::cout << "  Position (10, 10): "
+              << (robotMap.isAreaObstructed(10, 10) ? "OBSTRUCTED" : "CLEAR") << " ✓\n\n";
 
     std::cout << "=== All Tests Passed! ===\n\n";
 

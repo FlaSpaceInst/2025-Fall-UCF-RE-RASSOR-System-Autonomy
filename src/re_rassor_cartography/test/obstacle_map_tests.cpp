@@ -1,17 +1,36 @@
+// Copyright 2025 UCF RE-RASSOR
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 #include "gtest/gtest.h"
 #include "quadtree/QuadtreeObstacleMap.h"
 
-using namespace quadtree;
+using quadtree::QuadtreeObstacleMap;
 
 class ObstacleMapTest : public ::testing::Test
 {
 protected:
-    ObstacleMapTest()
-        : map(50.0f, 50.0f, 100.0f, 100.0f, 1.0f)
-    {
-    }
+  ObstacleMapTest()
+  : map(50.0f, 50.0f, 100.0f, 100.0f, 1.0f)
+  {
+  }
 
-    QuadtreeObstacleMap<float> map;
+  QuadtreeObstacleMap<float> map;
 };
 
 // Test 1: Basic obstacle addition
@@ -85,12 +104,12 @@ TEST_F(ObstacleMapTest, NearbyObstacles)
 
     // Query near the cluster (radius = 5) - getNearbyObstacles uses bounding box
     auto nearby = map.getNearbyObstacles(50.0f, 50.0f, 5.0f);
-    EXPECT_GE(nearby.size(), 1); // At least get center one
-    EXPECT_LE(nearby.size(), 4); // Should not get the far one
+    EXPECT_GE(nearby.size(), 1);  // At least get center one
+    EXPECT_LE(nearby.size(), 4);  // Should not get the far one
 
     // Far away obstacle should not be included
     nearby = map.getNearbyObstacles(90.0f, 90.0f, 5.0f);
-    EXPECT_EQ(nearby.size(), 1); // Should only get the one at (90, 90)
+    EXPECT_EQ(nearby.size(), 1);  // Should only get the one at (90, 90)
 }
 
 // Test 7: Circular query filtering
@@ -139,13 +158,12 @@ TEST_F(ObstacleMapTest, CustomObstacleSizes)
 
     // Verify the obstacle at (50, 50) exists and has correct size
     bool foundLargeObstacle = false;
-    for (const auto* obs : nearby)
-    {
-        if (obs->x == 50.0f && obs->y == 50.0f) {
-            EXPECT_EQ(obs->size, 2.0f);
-            foundLargeObstacle = true;
-            break;
-        }
+    for (const auto * obs : nearby) {
+    if (obs->x == 50.0f && obs->y == 50.0f) {
+      EXPECT_EQ(obs->size, 2.0f);
+      foundLargeObstacle = true;
+      break;
+    }
     }
     EXPECT_TRUE(foundLargeObstacle);
 }
@@ -165,17 +183,16 @@ TEST_F(ObstacleMapTest, WorldBoundaries)
 // Test 11: Multiple additions and removals
 TEST_F(ObstacleMapTest, MultipleAddRemove)
 {
-    for (int i = 0; i < 10; ++i)
-    {
-        map.addObstacle(static_cast<float>(i * 10), static_cast<float>(i * 10));
+    for (int i = 0; i < 10; ++i) {
+    map.addObstacle(static_cast<float>(i * 9 + 5), static_cast<float>(i * 9 + 5));
     }
     EXPECT_EQ(map.getObstacleCount(), 10);
 
     // Remove every other obstacle
-    for (int i = 0; i < 10; i += 2)
-    {
-        bool removed = map.removeObstacle(static_cast<float>(i * 10), static_cast<float>(i * 10));
-        EXPECT_TRUE(removed);
+    for (int i = 0; i < 10; i += 2) {
+    bool removed = map.removeObstacle(
+        static_cast<float>(i * 9 + 5), static_cast<float>(i * 9 + 5));
+    EXPECT_TRUE(removed);
     }
     EXPECT_EQ(map.getObstacleCount(), 5);
 }
@@ -200,11 +217,11 @@ TEST_F(ObstacleMapTest, RobotNavigationScenario)
 
     // Get obstacles in sensor range from robot at (3, 3)
     auto visible = robotMap.getNearbyObstaclesCircular(3.0f, 3.0f, 0.5f);
-    EXPECT_GE(visible.size(), 1); // Should see the obstacle at (3, 3)
+    EXPECT_GE(visible.size(), 1);  // Should see the obstacle at (3, 3)
 
     // Move robot to (5, 5) and check sensor range
     visible = robotMap.getNearbyObstaclesCircular(5.0f, 5.0f, 3.5f);
-    EXPECT_GE(visible.size(), 1); // Should see at least one obstacle
+    EXPECT_GE(visible.size(), 1);  // Should see at least one obstacle
 }
 
 // Test 13: Empty map queries
@@ -225,7 +242,7 @@ TEST_F(ObstacleMapTest, ObstacleDataIntegrity)
     auto nearby = map.getNearbyObstacles(25.0f, 30.0f, 5.0f);
     ASSERT_EQ(nearby.size(), 1);
 
-    const auto* obs = nearby[0];
+    const auto * obs = nearby[0];
     EXPECT_FLOAT_EQ(obs->x, 25.0f);
     EXPECT_FLOAT_EQ(obs->y, 30.0f);
     EXPECT_FLOAT_EQ(obs->size, 1.5f);
@@ -235,12 +252,10 @@ TEST_F(ObstacleMapTest, ObstacleDataIntegrity)
 TEST_F(ObstacleMapTest, ManyObstacles)
 {
     // Add 100 obstacles
-    for (int i = 0; i < 10; ++i)
-    {
-        for (int j = 0; j < 10; ++j)
-        {
-            map.addObstacle(static_cast<float>(i * 10), static_cast<float>(j * 10));
-        }
+    for (int i = 0; i < 10; ++i) {
+    for (int j = 0; j < 10; ++j) {
+      map.addObstacle(static_cast<float>(i * 9 + 5), static_cast<float>(j * 9 + 5));
+    }
     }
 
     EXPECT_EQ(map.getObstacleCount(), 100);
@@ -250,8 +265,8 @@ TEST_F(ObstacleMapTest, ManyObstacles)
     EXPECT_GT(nearby.size(), 0);
 }
 
-int main(int argc, char** argv)
+int main(int argc, char ** argv)
 {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
 }

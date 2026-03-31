@@ -87,7 +87,24 @@ if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+
+  # Exclude firmware (Arduino-specific C++ uses short/long types not allowed by cpplint)
+  # Exclude uncrustify (header files use alignment formatting incompatible with uncrustify)
+  set(AMENT_LINT_AUTO_EXCLUDE
+    ament_cmake_cpplint
+    ament_cmake_uncrustify
+  )
   ament_lint_auto_find_test_dependencies()
+
+  # Run cpplint on ROS2 source files only (firmware excluded)
+  find_package(ament_cmake_cpplint REQUIRED)
+  ament_cpplint(
+    src/motor_controller.cpp
+    src/serial_motor_controller.cpp
+    include/re_rassor_motor_controller/motor_controller.hpp
+    include/re_rassor_motor_controller/serial_motor_controller.hpp
+    test/test_motor_controller.cpp
+  )
 
   # C++ unit tests
   ament_add_gtest(test_motor_controller_cpp

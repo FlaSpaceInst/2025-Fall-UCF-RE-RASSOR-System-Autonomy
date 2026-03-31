@@ -1,3 +1,22 @@
+// Copyright 2025 UCF RE-RASSOR
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 #pragma once
 
 /**
@@ -36,29 +55,32 @@
  * NOTE: odom→base_link TF is owned by mission_control, same as motor_controller.
  */
 
-#include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/twist.hpp"
-#include "geometry_msgs/msg/transform_stamped.hpp"
-#include "std_msgs/msg/float64.hpp"
-#include "std_msgs/msg/int8.hpp"
-#include "nav_msgs/msg/odometry.hpp"
-#include "re_rassor_interfaces/msg/location_status.hpp"
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
-#include <atomic>
-#include <condition_variable>
-#include <deque>
-#include <memory>
-#include <mutex>
-#include <thread>
-#include <cstdint>
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "re_rassor_interfaces/msg/location_status.hpp"
+#include "std_msgs/msg/float64.hpp"
+#include "std_msgs/msg/int8.hpp"
 
-namespace re_rassor {
+namespace re_rassor
+{
 
 // ── Arduino serial command bytes ─────────────────────────────────────────────
-namespace SerialCmd {
+namespace SerialCmd
+{
     // Wheel commands
     constexpr uint8_t STOP        = 0x00;
     constexpr uint8_t FWD         = 0x01;
@@ -74,7 +96,7 @@ namespace SerialCmd {
     constexpr uint8_t LOWER_BACK  = 0x08;
     constexpr uint8_t DUMP        = 0x01;
     constexpr uint8_t DIG         = 0x02;
-}
+}  // namespace SerialCmd
 
 // ── State structs (reuse names, independent from motor_controller.hpp) ────────
 
@@ -180,4 +202,4 @@ private:
     static double normalizeAngle(double angle);
 };
 
-} // namespace re_rassor
+}  // namespace re_rassor

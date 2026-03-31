@@ -5,6 +5,9 @@ build/
 install/
 log/
 out/
+assets/
+docs/
+node_modules/
 
 # Ament / CMake
 ament_ws/

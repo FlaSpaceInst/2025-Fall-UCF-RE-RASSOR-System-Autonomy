@@ -34,6 +34,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # /home/mistry/ros2_ws (or equivalent)
 REPO_DIR="${SCRIPT_DIR}"                     # this repo's root
+SD_CARD_DIR="${SCRIPT_DIR}/SD_CARD"          # all image artefacts land here
 
 ROS_DISTRO="jazzy"
 ROVER_USER="ubuntu"
@@ -42,9 +43,9 @@ PI_WS_DIR="${ROVER_HOME}/ros2_ws"
 PI_REPO_DIR="${PI_WS_DIR}/2025-Fall-UCF-RE-RASSOR-System-Autonomy"
 
 # Ubuntu 24.04 LTS ARM64 Raspberry Pi preinstalled server image
-BASE_IMAGE_URL="https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.4-preinstalled-server-arm64+raspi.img.xz"
-BASE_IMAGE_XZ="$(basename "${BASE_IMAGE_URL}")"
-BASE_IMAGE_IMG="${BASE_IMAGE_XZ%.xz}"
+BASE_IMAGE_URL="https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.2-preinstalled-server-arm64+raspi.img.xz"
+BASE_IMAGE_XZ="${SD_CARD_DIR}/$(basename "${BASE_IMAGE_URL}")"
+BASE_IMAGE_IMG="${SD_CARD_DIR}/$(basename "${BASE_IMAGE_URL%.xz}")"
 
 # Arduino physical USB port kernel IDs (edit if hardware layout differs)
 WHEEL_USB_KERNEL="1-2"
@@ -87,10 +88,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "${OUTPUT_IMAGE}" ]] && OUTPUT_IMAGE="re-rassor-pi-$(date +%Y-%m-%d).img"
+# Place output in SD_CARD_DIR (use as-is if an absolute path was given)
+if [[ -z "${OUTPUT_IMAGE}" ]]; then
+    OUTPUT_IMAGE="${SD_CARD_DIR}/re-rassor-pi-$(date +%Y-%m-%d).img"
+elif [[ "${OUTPUT_IMAGE}" != /* ]]; then
+    OUTPUT_IMAGE="${SD_CARD_DIR}/${OUTPUT_IMAGE}"
+fi
 
 # ── Guards ─────────────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run with sudo:  sudo bash make_pi_image.sh"
+
+mkdir -p "${SD_CARD_DIR}"
 
 HOST_ARCH=$(uname -m)
 

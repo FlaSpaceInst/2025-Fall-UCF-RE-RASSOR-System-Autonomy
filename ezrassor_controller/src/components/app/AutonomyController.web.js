@@ -86,6 +86,13 @@ export default function AutonomyController({ navigation }) {
                 setOdom({ x: data.x ?? 0, y: data.y ?? 0, yaw: data.yaw ?? 0 });
             });
 
+            socket.on('calibrated', () => {
+                setOdom({ x: 0, y: 0, yaw: 0 });
+                setNavGoal(null);
+                setSelected(null);
+                setStatus('Calibrated — position reset to (0, 0)');
+            });
+
             socket.on('depth_image', (data) => {
                 renderDepth(data);
             });
@@ -155,8 +162,16 @@ export default function AutonomyController({ navigation }) {
     const handleCalibrate = async () => {
         try {
             const url = ip.startsWith('http') ? ip : `http://${ip}`;
+            setStatus('Calibrating…');
             const res = await fetch(`${url}/calibrate`, { method: 'POST' });
-            setStatus(res.ok ? 'Calibration triggered' : `/calibrate returned ${res.status}`);
+            if (res.ok) {
+                setOdom({ x: 0, y: 0, yaw: 0 });
+                setNavGoal(null);
+                setSelected(null);
+                setStatus('Calibrated — position reset to (0, 0)');
+            } else {
+                setStatus(`/calibrate returned ${res.status}`);
+            }
         } catch (e) {
             setStatus(`Calibrate error: ${e.message}`);
         }

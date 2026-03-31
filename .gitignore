@@ -99,4 +99,4 @@ docs/
 node_modules/
 CLAUDE.md 
 *.pdf
-SD_CARD/
+SD_CARD

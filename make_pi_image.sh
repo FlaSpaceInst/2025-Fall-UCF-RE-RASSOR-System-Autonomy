@@ -42,7 +42,7 @@ PI_WS_DIR="${ROVER_HOME}/ros2_ws"
 PI_REPO_DIR="${PI_WS_DIR}/2025-Fall-UCF-RE-RASSOR-System-Autonomy"
 
 # Ubuntu 24.04 LTS ARM64 Raspberry Pi preinstalled server image
-BASE_IMAGE_URL="https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.2-preinstalled-server-arm64+raspi.img.xz"
+BASE_IMAGE_URL="https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.4-preinstalled-server-arm64+raspi.img.xz"
 BASE_IMAGE_XZ="$(basename "${BASE_IMAGE_URL}")"
 BASE_IMAGE_IMG="${BASE_IMAGE_XZ%.xz}"
 

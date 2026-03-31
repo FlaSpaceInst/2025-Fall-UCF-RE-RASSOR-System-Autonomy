@@ -412,7 +412,17 @@ private:
         // Publish the static map->odom transform that defines the calibrated origin.
         // After this, the map frame origin corresponds to the robot's current position,
         // and the robot's current heading becomes the rover +Y (forward) direction.
-    publishStaticMapToOdom(current);
+        publishStaticMapToOdom(current);
+
+        // Reset all odometry accumulators to (0,0,0) so that /odometry/fused
+        // immediately reports (0,0,0) after calibration.
+        {
+            std::lock_guard<std::mutex> lock(odom_mutex_);
+            wheel_pose_  = Pose2D{};
+            visual_pose_ = Pose2D{};
+            fused_pose_  = Pose2D{};
+            have_visual_ = false;
+        }
 
     RCLCPP_INFO(get_logger(),
             "Calibrated! Origin set to map pose (%.3f, %.3f, %.3f rad). "

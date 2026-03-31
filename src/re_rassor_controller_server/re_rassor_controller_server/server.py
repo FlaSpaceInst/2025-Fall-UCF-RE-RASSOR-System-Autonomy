@@ -473,16 +473,34 @@ def main(passed_args=None):
             return jsonify({'status': 500, 'error': str(e)}), 500
 
     # ── POST /calibrate ───────────────────────────────────────────────────────
+    calibrate_client = node.create_client(std_srvs.srv.Trigger, CALIBRATE_SERVICE)
+
     @app.route('/calibrate', methods=['POST'])
     def handle_calibrate():
         try:
-            subprocess.Popen([
-                'ros2', 'service', 'call',
-                '/re_rassor/calibrate',
-                'std_srvs/srv/Trigger', '{}',
-            ])
-            node.get_logger().info('Calibrate: called /re_rassor/calibrate')
-            return jsonify({'status': 200, 'message': 'calibration triggered'})
+            if not calibrate_client.wait_for_service(timeout_sec=2.0):
+                node.get_logger().warning('/re_rassor/calibrate service not available')
+                return jsonify({'status': 503, 'error': 'calibrate service not available'}), 503
+
+            future = calibrate_client.call_async(std_srvs.srv.Trigger.Request())
+            # Wait up to 3 s for the service to respond
+            deadline = time.time() + 3.0
+            while not future.done() and time.time() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
+
+            if future.done():
+                result = future.result()
+                node.get_logger().info(
+                    f'Calibrate: {result.message}')
+                # Push reset event to all connected WebSocket clients
+                if _socketio is not None:
+                    _socketio.emit('calibrated', {'x': 0, 'y': 0, 'yaw': 0})
+                return jsonify({'status': 200, 'message': result.message,
+                                'success': result.success})
+            else:
+                node.get_logger().warning('Calibrate service call timed out')
+                return jsonify({'status': 504, 'error': 'service call timed out'}), 504
+
         except Exception as e:
             node.get_logger().error(f'/calibrate error: {e}')
             return jsonify({'status': 500, 'error': str(e)}), 500

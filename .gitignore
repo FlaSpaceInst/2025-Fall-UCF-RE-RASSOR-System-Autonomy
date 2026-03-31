@@ -89,3 +89,11 @@ notes.txt
 #ezrassor_controller/
 motor_controller.py
 src/re_rassor_traffic_controller/src/
+
+*.gv
+assets/
+docs/
+node_modules/
+CLAUDE.md 
+*.pdf
+SD_CARD/

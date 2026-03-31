@@ -32,8 +32,8 @@ namespace re_rassor {
 // Constructor
 // ============================================================================
 
-SerialMotorController::SerialMotorController()
-: Node("serial_motor_controller"),
+SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options)
+: Node("serial_motor_controller", options),
   commands_active_(false)
 {
     this->declare_parameter("wheel_port",           "/dev/arduino_wheel");
@@ -496,13 +496,3 @@ SerialMotorController::~SerialMotorController()
 }
 
 } // namespace re_rassor
-
-// ============================================================================
-int main(int argc, char** argv)
-{
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<re_rassor::SerialMotorController>();
-    rclcpp::spin(node);
-    rclcpp::shutdown();
-    return 0;
-}

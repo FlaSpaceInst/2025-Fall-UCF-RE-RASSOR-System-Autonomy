@@ -101,7 +101,8 @@ struct SerialOdometryState {
 class SerialMotorController : public rclcpp::Node
 {
 public:
-    SerialMotorController();
+    explicit SerialMotorController(
+        const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
     ~SerialMotorController();
 
     SerialMotorState    getMotorState()    const;

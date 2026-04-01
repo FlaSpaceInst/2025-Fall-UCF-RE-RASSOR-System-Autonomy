@@ -72,6 +72,7 @@ RUN apt-get update && apt-get install -y -qq \
     ros-${ROS_DISTRO}-xacro \
     ros-${ROS_DISTRO}-joint-state-publisher \
     ros-${ROS_DISTRO}-depthimage-to-laserscan \
+    ros-${ROS_DISTRO}-backward-ros \
     && rm -rf /var/lib/apt/lists/*
 
 # C++ system libraries

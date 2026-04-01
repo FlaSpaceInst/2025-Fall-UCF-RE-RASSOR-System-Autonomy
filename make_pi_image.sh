@@ -35,14 +35,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # /home/mistry/ros2_ws (or equivalent)
 REPO_DIR="${SCRIPT_DIR}"                     # this repo's root
 
-ROS_DISTRO="jazzy"
+ROS_DISTRO="humble"
 ROVER_USER="ubuntu"
 ROVER_HOME="/home/${ROVER_USER}"
 PI_WS_DIR="${ROVER_HOME}/ros2_ws"
 PI_REPO_DIR="${PI_WS_DIR}/2025-Fall-UCF-RE-RASSOR-System-Autonomy"
 
-# Ubuntu 24.04 LTS ARM64 Raspberry Pi preinstalled server image
-BASE_IMAGE_URL="https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.2-preinstalled-server-arm64+raspi.img.xz"
+# Ubuntu 22.04 LTS ARM64 Raspberry Pi preinstalled server image
+BASE_IMAGE_URL="https://cdimage.ubuntu.com/releases/22.04/release/ubuntu-22.04.5-preinstalled-server-arm64+raspi.img.xz"
 BASE_IMAGE_XZ="$(basename "${BASE_IMAGE_URL}")"
 BASE_IMAGE_IMG="${BASE_IMAGE_XZ%.xz}"
 
@@ -139,7 +139,7 @@ trap cleanup EXIT
 # =============================================================================
 # 1. Download / locate base Ubuntu Pi image
 # =============================================================================
-step "Base image (Ubuntu 24.04 ARM64 Raspberry Pi)"
+step "Base image (Ubuntu 22.04 ARM64 Raspberry Pi)"
 
 if [[ "${SKIP_DOWNLOAD}" == true && -f "${BASE_IMAGE_IMG}" ]]; then
     ok "Using cached decompressed image: ${BASE_IMAGE_IMG}"
@@ -154,7 +154,7 @@ elif [[ -f "${BASE_IMAGE_XZ}" ]]; then
     xz -dk "${BASE_IMAGE_XZ}"
     ok "Decompressed → ${BASE_IMAGE_IMG}"
 else
-    info "Downloading Ubuntu 24.04 ARM64 Pi image (~1.1 GB) ..."
+    info "Downloading Ubuntu 22.04 ARM64 Pi image (~1.1 GB) ..."
     wget -c --show-progress "${BASE_IMAGE_URL}" -O "${BASE_IMAGE_XZ}"
     info "Decompressing ..."
     xz -dk "${BASE_IMAGE_XZ}"

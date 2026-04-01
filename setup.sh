@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # RE-RASSOR Rover Setup Script
-# Target: Raspberry Pi — Ubuntu 24.04 LTS (Noble) — ROS2 Jazzy
+# Target: Raspberry Pi — Ubuntu 22.04 LTS (Jammy) — ROS2 Humble
 #
 # Run once on a fresh Pi:
 #   sudo bash setup.sh
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ROS_DISTRO="jazzy"
+ROS_DISTRO="humble"
 ROVER_USER="${SUDO_USER:-ubuntu}"                        # the non-root user
 ROVER_HOME="/home/${ROVER_USER}"
 WS_DIR="${ROVER_HOME}/ros2_ws"
@@ -37,9 +37,9 @@ die()   { echo -e "\n${RED}✖ $*${NC}" >&2; exit 1; }
 # ── Guards ────────────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run with sudo:  sudo bash setup.sh"
 
-# Verify Ubuntu 24.04
-if ! grep -q 'Ubuntu 24' /etc/os-release 2>/dev/null; then
-    warn "This script targets Ubuntu 24.04. Detected:"
+# Verify Ubuntu 22.04
+if ! grep -q 'Ubuntu 22' /etc/os-release 2>/dev/null; then
+    warn "This script targets Ubuntu 22.04. Detected:"
     grep PRETTY_NAME /etc/os-release || true
     read -r -p "  Continue anyway? [y/N] " yn
     [[ "$yn" =~ ^[Yy]$ ]] || exit 1
@@ -71,22 +71,22 @@ apt-get install -y -qq \
 ok "Core utilities installed"
 
 # =============================================================================
-# 3. ROS2 Jazzy
+# 3. ROS2 Humble
 # =============================================================================
-step "ROS2 Jazzy"
+step "ROS2 Humble"
 
-if dpkg -l ros-jazzy-ros-base &>/dev/null; then
-    ok "ROS2 Jazzy already installed — skipping"
+if dpkg -l ros-humble-ros-base &>/dev/null; then
+    ok "ROS2 Humble already installed — skipping"
 else
     # Add ROS2 apt repo
     curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
         | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
-        http://packages.ros.org/ros2/ubuntu noble main" \
+        http://packages.ros.org/ros2/ubuntu jammy main" \
         > /etc/apt/sources.list.d/ros2.list
     apt-get update -qq
-    apt-get install -y -qq ros-jazzy-ros-base
-    ok "ROS2 Jazzy base installed"
+    apt-get install -y -qq ros-humble-ros-base
+    ok "ROS2 Humble base installed"
 fi
 
 # =============================================================================

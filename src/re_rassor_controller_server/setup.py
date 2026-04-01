@@ -19,7 +19,7 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
-            'controller_server = re_rassor_controller_server.server:main',
+            'controller_server = re_rassor_controller_server.controller_server:main',
         ],
     },
 )

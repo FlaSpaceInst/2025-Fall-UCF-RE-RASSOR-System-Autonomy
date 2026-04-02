@@ -291,8 +291,9 @@ def main(passed_args=None):
     def _depth_image_cb(msg):
         """
         Convert a 16UC1 (mm) or 32FC1 (m) depth image to an 8-bit grayscale
-        byte array (normalised to 5 m max) and broadcast it as base64 to
-        subscribed WebSocket clients at ~10 Hz.
+        array (normalised to 5 m max) and broadcast it as base64 at ~10 Hz.
+        Uses numpy for vectorised pixel conversion — the old per-pixel Python
+        loop took ~2 s on ARM and blocked the entire rclpy spin thread.
         """
         global _depth_img_counter
         _depth_img_counter += 1
@@ -304,26 +305,22 @@ def main(passed_args=None):
         if _socketio is None:
             return
         try:
-            import base64, struct
+            import base64
+            import numpy as np
             W, H = msg.width, msg.height
             if W == 0 or H == 0:
                 return
             raw = bytes(msg.data)
-            pixels = bytearray(W * H)
-            is_16 = msg.encoding in ('16UC1', 'mono16')
-            is_32 = msg.encoding == '32FC1'
-            if is_16:
-                for i in range(W * H):
-                    v = struct.unpack_from('<H', raw, i * 2)[0]
-                    pixels[i] = min(255, v * 255 // 5000)   # 5 m → full scale
-            elif is_32:
-                for i in range(W * H):
-                    v = struct.unpack_from('<f', raw, i * 4)[0]
-                    if math.isfinite(v) and v > 0.0:
-                        pixels[i] = min(255, int(v / 5.0 * 255))
+            if msg.encoding in ('16UC1', 'mono16'):
+                arr = np.frombuffer(raw, dtype=np.uint16).reshape((H, W))
+                pixels = np.clip(arr * 255 // 5000, 0, 255).astype(np.uint8)
+            elif msg.encoding == '32FC1':
+                arr = np.frombuffer(raw, dtype=np.float32).reshape((H, W))
+                finite = np.isfinite(arr) & (arr > 0.0)
+                pixels = np.where(finite, np.clip(arr / 5.0 * 255, 0, 255), 0).astype(np.uint8)
             else:
                 return   # unsupported encoding
-            b64 = base64.b64encode(bytes(pixels)).decode('ascii')
+            b64 = base64.b64encode(pixels.tobytes()).decode('ascii')
             _socketio.emit('depth_image', {
                 'data':   b64,
                 'width':  W,

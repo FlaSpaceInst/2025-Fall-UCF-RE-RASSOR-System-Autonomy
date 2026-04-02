@@ -11,7 +11,7 @@ from launch.conditions import IfCondition
 
 def generate_launch_description():
 
-    # -- Launch args ----------------------------------------------------------
+    # ── Launch args ──────────────────────────────────────────────────────────
     rviz = LaunchConfiguration("rviz")
 
     declare_args = [
@@ -37,15 +37,15 @@ def generate_launch_description():
         ),
     ]
 
-    # -- Nav2 params ----------------------------------------------------------
+    # ── Nav2 params ──────────────────────────────────────────────────────────
     nav2_params = PathJoinSubstitution([
         FindPackageShare("re_rassor_bringup"),
         "config",
         "nav2_params.yaml",
     ])
 
-    # -- 0a. Static TF: base_link -> camera_link ------------------------------
-    # 0.15 m forward, 0.10 m up, 5deg downward pitch (0.087 rad).
+    # ── 0a. Static TF: base_link → camera_link ───────────────────────────────
+    # 0.15 m forward, 0.10 m up, 5° downward pitch (0.087 rad).
     static_tf_base_to_camera = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -55,8 +55,8 @@ def generate_launch_description():
         output="screen",
     )
 
-    # -- 0b. Static TF: camera_link -> camera_color_optical_frame -------------
-    # Published statically -- prevents "extrapolation into the future" TF
+    # ── 0b. Static TF: camera_link → camera_color_optical_frame ─────────────
+    # Published statically — prevents "extrapolation into the future" TF
     # errors when RTAB-Map looks up the transform at exact image timestamps.
     static_tf_color_optical = Node(
         package="tf2_ros",
@@ -67,7 +67,7 @@ def generate_launch_description():
         output="screen",
     )
 
-    # -- 0c. Static TF: camera_link -> camera_depth_optical_frame -------------
+    # ── 0c. Static TF: camera_link → camera_depth_optical_frame ─────────────
     static_tf_depth_optical = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -77,7 +77,7 @@ def generate_launch_description():
         output="screen",
     )
 
-    # -- 1. Motor controller (serial) -----------------------------------------
+    # ── 1. Motor controller (serial) ─────────────────────────────────────────
     motor = Node(
         package="re_rassor_motor_controller",
         executable="serial_motor_controller",
@@ -90,15 +90,9 @@ def generate_launch_description():
         }],
     )
 
-    # -- 2. Astra Pro RGBD camera ---------------------------------------------
-    # Uses the official astra_pro launch file which correctly configures
-    # UVC colour + OpenNI2 depth and publishes all required topics:
-    #   /camera/color/image_raw
-    #   /camera/color/camera_info
-    #   /camera/depth/image_raw
-    #   /camera/depth/camera_info
-    #   /camera/depth/points      <- Nav2 costmaps
-    # publish_tf overridden to false -- static TFs above replace it.
+    # ── 2. Astra Pro RGBD camera ─────────────────────────────────────────────
+    # Uses official astra_pro launch — configures UVC colour + OpenNI2 depth.
+    # publish_tf=false: static TFs above replace the driver's dynamic ones.
     astra_camera = IncludeLaunchDescription(
         AnyLaunchDescriptionSource([
             PathJoinSubstitution([
@@ -110,18 +104,11 @@ def generate_launch_description():
         launch_arguments={"publish_tf": "false"}.items(),
     )
 
-    # -- 3. RTAB-Map (SLAM + odometry) ----------------------------------------
-    # Uses the official rtabmap_launch package -- this is the configuration
-    # that is confirmed working from manual testing.
-    #
-    # rtabmap_launch internally starts:
-    #   - rgbd_odometry  -> publishes /odom + odom->base_link TF
-    #   - rtabmap        -> publishes /map (OccupancyGrid) + map->odom TF
-    #
-    # approx_sync=true handles the Astra Pro's independent UVC/OpenNI2 clocks.
-    # frame_id=base_link ties the map to the robot body frame.
-    #
-    # Delayed 3 s to ensure camera topics are live before RTAB-Map subscribes.
+    # ── 3. RTAB-Map (SLAM + odometry) ────────────────────────────────────────
+    # rtabmap_launch runs rgbd_odometry + rtabmap inside the /rtabmap namespace.
+    # Internally they communicate correctly via /rtabmap/odom_info.
+    # Externally their topics are /rtabmap/odom and /rtabmap/map.
+    # Relay nodes below (3b, 3c) bridge these to /odom and /map for Nav2.
     rtabmap = TimerAction(
         period=3.0,
         actions=[IncludeLaunchDescription(
@@ -133,25 +120,63 @@ def generate_launch_description():
                 ])
             ]),
             launch_arguments={
-                "rgb_topic":         "/camera/color/image_raw",
-                "depth_topic":       "/camera/depth/image_raw",
-                "camera_info_topic": "/camera/color/camera_info",
-                "approx_sync":       "true",
-                "frame_id":          "base_link",
-                "odom_frame_id":     "odom",
-                # Let rtabmap_launch manage its own rviz
-                "rviz":              "false",
-                # Use depth for grid, 2D mode for ground robot
-                "args":              "--delete_db_on_start",
-                "use_sim_time":      "false",
+                "rgb_topic":            "/camera/color/image_raw",
+                "depth_topic":          "/camera/depth/image_raw",
+                "camera_info_topic":    "/camera/color/camera_info",
+                "approx_sync":          "true",
+                "frame_id":             "base_link",
+                "odom_frame_id":        "odom",
+                "rviz":                 "false",
+                "rtabmap_viz":          "false",
+                # RTAB-Map internal params must go inside the args string.
+                # Passing them as launch arguments crashes Humble (unknown args).
+                "args": (
+                    "--delete_db_on_start"
+                    " --Reg/Force3DoF true"
+                    " --Grid/FromDepth true"
+                    " --Grid/3D false"
+                    " --Grid/CellSize 0.05"
+                    " --Grid/RangeMax 4.0"
+                    " --Grid/MinGroundHeight -0.1"
+                    " --Grid/MaxGroundHeight 0.15"
+                ),
+                "use_sim_time":    "false",
+                "publish_tf_odom": "true",
+                "publish_tf_map":  "true",
             }.items(),
         )],
     )
 
-    # -- 4. Mission control ---------------------------------------------------
-    # Fuses /odometry/wheel + /odom -> /odometry/fused.
-    # Broadcasts odom->base_link TF.
-    # visual_odom_topic=/odom -- picks up rtabmap_launch's odometry directly.
+    # ── 3b. Relay: /rtabmap/odom → /odom ─────────────────────────────────────
+    # Humble topic_tools relay takes positional CLI arguments.
+    odom_relay = TimerAction(
+        period=4.0,
+        actions=[Node(
+            package="topic_tools",
+            executable="relay",
+            name="odom_relay",
+            output="screen",
+            arguments=["/rtabmap/odom", "/odom"],
+        )],
+    )
+
+    # ── 3c. Relay: /rtabmap/map → /map ───────────────────────────────────────
+    # Published with default QoS — Nav2 static_layer uses transient_local
+    # so set map_subscribe_transient_local: false in nav2_params.yaml.
+    map_relay = TimerAction(
+        period=4.0,
+        actions=[Node(
+            package="topic_tools",
+            executable="relay",
+            name="map_relay",
+            output="screen",
+            arguments=["/rtabmap/map", "/map"],
+        )],
+    )
+
+    # ── 4. Mission control ───────────────────────────────────────────────────
+    # Fuses /odometry/wheel + /odom → /odometry/fused.
+    # Broadcasts odom→base_link TF.
     mission_control = TimerAction(
         period=5.0,
         actions=[Node(
@@ -163,25 +188,18 @@ def generate_launch_description():
                 "wheel_odom_topic":  "/odometry/wheel",
                 "visual_odom_topic": "/odom",
                 "fused_odom_topic":  "/odometry/fused",
-                "visual_weight":     0.0,   # wheel-only: no visual correction
+                "visual_weight":     0.3,
             }],
         )],
     )
 
-    # -- 5. Nav2 stack --------------------------------------------------------
-    # Delayed 10 s -- RTAB-Map must be publishing /map and /odom before
-    # Nav2 costmaps and bt_navigator initialize.
+    # ── 5. Nav2 stack ────────────────────────────────────────────────────────
+    # Delayed 10 s — RTAB-Map and relays must be publishing /map and /odom
+    # before Nav2 costmaps and bt_navigator initialize.
     #
-    # map_server is absent -- rtabmap_launch owns /map and map->odom TF.
-    # lifecycle_manager does not manage rtabmap (not a Nav2 lifecycle node).
-    #
-    # Both costmaps use rolling_window + depth point cloud only:
-    #   local:  VoxelLayer  from /camera/depth/points  (6x6m)
-    #   global: ObstacleLayer from /camera/depth/points (20x20m)
-    #
-    # odom_topic=/odom in bt_navigator and velocity_smoother -- uses
-    # rtabmap_launch's odometry directly, no dependency on mission_control
-    # fused odom for Nav2 core functions.
+    # global costmap: static_layer reads /map (from relay) + obstacle_layer
+    #                 reads /camera/depth/points for live obstacles.
+    # local costmap:  voxel_layer reads /camera/depth/points.
     nav2_nodes = [
         Node(
             package="nav2_controller",
@@ -229,7 +247,7 @@ def generate_launch_description():
 
     nav2 = TimerAction(period=10.0, actions=[GroupAction(nav2_nodes)])
 
-    # -- 6. RViz2 (optional) --------------------------------------------------
+    # ── 6. RViz2 (optional) ──────────────────────────────────────────────────
     rviz_node = TimerAction(
         period=11.0,
         actions=[Node(
@@ -243,12 +261,14 @@ def generate_launch_description():
 
     return LaunchDescription([
         *declare_args,
-        static_tf_base_to_camera,   # base_link  -> camera_link
-        static_tf_color_optical,    # camera_link -> camera_color_optical_frame
-        static_tf_depth_optical,    # camera_link -> camera_depth_optical_frame
+        static_tf_base_to_camera,   # base_link  → camera_link
+        static_tf_color_optical,    # camera_link → camera_color_optical_frame
+        static_tf_depth_optical,    # camera_link → camera_depth_optical_frame
         motor,
         astra_camera,
         rtabmap,
+        odom_relay,                 # /rtabmap/odom → /odom
+        map_relay,                  # /rtabmap/map  → /map
         mission_control,
         nav2,
         rviz_node,

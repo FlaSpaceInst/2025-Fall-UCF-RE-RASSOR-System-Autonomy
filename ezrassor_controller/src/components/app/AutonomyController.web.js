@@ -158,6 +158,23 @@ export default function AutonomyController({ navigation }) {
         }
     };
 
+    // ── Force stop — send zero wheel command ──────────────────────────────────
+    const handleForceStop = async () => {
+        try {
+            const url = ip.startsWith('http') ? ip : `http://${ip}`;
+            await fetch(`${url}/`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ wheel_action: { linear_x: 0, angular_z: 0 } }),
+            });
+            setNavGoal(null);
+            setSelected(null);
+            setStatus('FORCE STOP sent — rover halted');
+        } catch (e) {
+            setStatus(`Force stop error: ${e.message}`);
+        }
+    };
+
     // ── Send calibrate request ─────────────────────────────────────────────────
     const handleCalibrate = async () => {
         try {
@@ -347,6 +364,9 @@ export default function AutonomyController({ navigation }) {
 
                     {/* Control buttons */}
                     <View style={styles.ctrlRow}>
+                        <Pressable style={styles.forceStopBtn} onPress={handleForceStop}>
+                            <Text style={styles.ctrlBtnText}>⬛ FORCE STOP</Text>
+                        </Pressable>
                         <Pressable style={styles.calibrateBtn} onPress={handleCalibrate}>
                             <Text style={styles.ctrlBtnText}>CALIBRATE</Text>
                         </Pressable>
@@ -440,6 +460,9 @@ const styles = StyleSheet.create({
     odomGoal:      { color: '#ff8a65', fontSize: 12, marginTop: 4 },
 
     ctrlRow:       { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+    forceStopBtn:  { flex: 1, backgroundColor: '#212121', borderRadius: 6,
+                     paddingVertical: 12, alignItems: 'center', minWidth: 120,
+                     borderWidth: 2, borderColor: '#f44336' },
     calibrateBtn:  { flex: 1, backgroundColor: '#b71c1c', borderRadius: 6,
                      paddingVertical: 12, alignItems: 'center', minWidth: 120 },
     ctrlBtnText:   { color: '#fff', fontWeight: '700', fontSize: 13, letterSpacing: 1 },

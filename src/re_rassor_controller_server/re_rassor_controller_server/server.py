@@ -626,6 +626,7 @@ def main(passed_args=None):
             debug=False,
             use_reloader=False,
             log_output=False,
+            allow_unsafe_werkzeug=True,
         )
 
     flask_thread = threading.Thread(target=_run_server, daemon=True)

@@ -25,6 +25,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/ioctl.h>
 
 namespace re_rassor {
 
@@ -183,6 +184,14 @@ int SerialMotorController::openSerial(const std::string& port, int baud)
         ::close(fd);
         return -1;
     }
+
+    // Toggle DTR to reset Arduino (mirrors pyserial's open() behaviour).
+    // DTR low → asserts Arduino reset pin; DTR high → releases it.
+    int dtr = TIOCM_DTR;
+    ioctl(fd, TIOCMBIC, &dtr);   // lower DTR — Arduino enters reset
+    usleep(100000);               // 100 ms
+    ioctl(fd, TIOCMBIS, &dtr);   // raise DTR — Arduino boots
+    usleep(2000000);              // 2 s — wait for bootloader to finish
 
     return fd;
 }

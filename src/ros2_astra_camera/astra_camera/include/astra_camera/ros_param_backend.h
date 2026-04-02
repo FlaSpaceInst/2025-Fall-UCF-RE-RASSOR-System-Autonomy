@@ -9,24 +9,21 @@
 /* the terms of the license.                                              */
 /*                                                                        */
 /**************************************************************************/
+
 #pragma once
 #include <rclcpp/rclcpp.hpp>
 
 namespace astra_camera {
-
 class ParametersBackend {
  public:
   explicit ParametersBackend(rclcpp::Node* node);
   ~ParametersBackend();
-
   void addOnSetParametersCallback(
-      std::function<rcl_interfaces::msg::SetParametersResult(
-          const std::vector<rclcpp::Parameter>&)> callback);
+      rclcpp::node_interfaces::NodeParametersInterface::OnParametersSetCallbackType callback);
 
  private:
   rclcpp::Node* node_;
   rclcpp::Logger logger_;
-  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr ros_callback_;
+  std::shared_ptr<void> ros_callback_;
 };
-
 }  // namespace astra_camera

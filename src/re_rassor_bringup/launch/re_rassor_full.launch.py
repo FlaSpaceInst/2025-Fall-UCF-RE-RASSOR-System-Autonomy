@@ -141,8 +141,11 @@ def generate_launch_description():
                     " --Grid/MaxGroundHeight 0.15"
                 ),
                 "use_sim_time":    "false",
-                "publish_tf_odom": "true",
-                "publish_tf_map":  "true",
+                # mission_control owns odom→base_link (fused wheel+visual) and
+                # map→odom (calibration origin).  RTAB-Map must NOT publish these
+                # or it fights mission_control and corrupts Nav2's heading.
+                "publish_tf_odom": "false",
+                "publish_tf_map":  "false",
             }.items(),
         )],
     )

@@ -178,6 +178,16 @@ public:
         // -- Broadcast initial identity map->odom until calibrated ---------
     publishStaticMapToOdom(Pose2D{});
 
+        // -- Fallback timer: keep publishing fused odom from visual when wheel is silent --
+        // The wheel encoder only sends data while motors are actively driven.
+        // When Nav2 pauses (orientation adjustment, recovery), wheel odom dies and
+        // fused odom stops publishing entirely, causing Nav2 to lose localization.
+        // This 20 Hz timer publishes fused odom from RTAB-Map visual odometry whenever
+        // wheel odom has been silent for more than 300 ms.
+    odom_fallback_timer_ = create_wall_timer(
+            std::chrono::milliseconds(50),
+            std::bind(&MissionControl::odomFallbackCallback, this));
+
     RCLCPP_INFO(get_logger(),
             "MissionControl ready.\n"
             "  Wheel odom  : %s\n"
@@ -224,7 +234,8 @@ private:
   bool               have_visual_ = false;
 
     // dt tracking for wheel integration
-  rclcpp::Time       last_wheel_stamp_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time                    last_wheel_stamp_{0, 0, RCL_ROS_TIME};
+  geometry_msgs::msg::Twist       last_wheel_twist_;   // saved for fallback publish
 
     // -- Calibration -------------------------------------------------------
   mutable std::mutex calib_mutex_;
@@ -250,6 +261,7 @@ private:
 
   rclcpp_action::Client<NavigateToPose>::SharedPtr nav_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr calibrate_srv_;
+  rclcpp::TimerBase::SharedPtr odom_fallback_timer_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   tf2_ros::StaticTransformBroadcaster                  static_tf_broadcaster_;
@@ -267,6 +279,7 @@ private:
     wheel_pose_.y = msg->pose.pose.position.y;
     wheel_pose_.yaw = tf2::getYaw(msg->pose.pose.orientation);
     last_wheel_stamp_ = stamp;
+    last_wheel_twist_ = msg->twist.twist;
 
         // Wheel is always the primary driver -- update fused and publish at 50Hz.
         // Visual callback only blends on top when visual_weight > 0.
@@ -315,6 +328,54 @@ private:
     fused_pose_.yaw = normalizeAngle(
             wheel_pose_.yaw + w * normalizeAngle(
                 visual_pose_.yaw - wheel_pose_.yaw));
+  }
+
+    // ---------------------------------------------------------------------
+    // Fallback timer callback (20 Hz)
+    //
+    // Wheel encoder data only arrives while motors are actively driven.
+    // When Nav2 pauses for orientation adjustment or recovery, wheel odom
+    // silences → fused odom silences → Nav2 loses the odom→base_link TF
+    // and freezes distance_remaining, entering an infinite recovery loop.
+    //
+    // This callback detects wheel silence (>300 ms) and keeps fused odom
+    // alive using the last visual (RTAB-Map) pose instead.
+    // ---------------------------------------------------------------------
+  void odomFallbackCallback()
+  {
+    if (!have_visual_) {
+      return;
+    }
+
+    const auto now_t = now();
+    double wheel_age_sec = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      if (last_wheel_stamp_.nanoseconds() == 0) {
+        return;   // wheel odom has never arrived yet — nothing to fall back from
+      }
+      wheel_age_sec = (now_t - last_wheel_stamp_).seconds();
+    }
+
+    if (wheel_age_sec < 0.3) {
+      return;   // wheel odom is current — wheelOdomCallback handles publishing
+    }
+
+    // Wheel has been silent — publish fused odom from visual pose
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      fused_pose_.x   = visual_pose_.x;
+      fused_pose_.y   = visual_pose_.y;
+      fused_pose_.yaw = visual_pose_.yaw;
+
+      geometry_msgs::msg::Twist zero_twist;
+      publishFusedOdom(now_t, zero_twist);
+      broadcastFusedTF(now_t);
+    }
+
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "Wheel odom silent for %.1f s — publishing fused odom from visual odometry",
+        wheel_age_sec);
   }
 
     // ---------------------------------------------------------------------

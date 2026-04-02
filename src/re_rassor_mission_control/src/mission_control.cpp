@@ -320,14 +320,19 @@ private:
     visual_pose_.yaw = tf2::getYaw(msg->pose.pose.orientation);
     have_visual_ = true;
 
-        // Nudge fused pose toward visual estimate without overriding wheel data.
-        // wheelOdomCallback will overwrite fused_pose_ on the next wheel tick
-        // (50Hz), so this only has effect until the next wheel message arrives.
     fused_pose_.x = (1.0 - w) * wheel_pose_.x + w * visual_pose_.x;
     fused_pose_.y = (1.0 - w) * wheel_pose_.y + w * visual_pose_.y;
     fused_pose_.yaw = normalizeAngle(
             wheel_pose_.yaw + w * normalizeAngle(
                 visual_pose_.yaw - wheel_pose_.yaw));
+
+        // Publish fused odom from visual callback too.
+        // When wheel odom is alive this is redundant (wheel publishes at 50 Hz),
+        // but when the Arduino goes silent (Nav2 pauses, recovery behaviors) this
+        // keeps /odometry/fused and the odom→base_link TF alive at ~2-5 Hz so
+        // Nav2 never loses localization and distance_remaining doesn't freeze.
+    publishFusedOdom(stamp, msg->twist.twist);
+    broadcastFusedTF(stamp);
   }
 
     // ---------------------------------------------------------------------

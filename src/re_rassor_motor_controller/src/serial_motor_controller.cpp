@@ -45,19 +45,23 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
     this->declare_parameter("max_angular_velocity", 2.0);
     this->declare_parameter("update_rate",          50.0);
     this->declare_parameter("rover_namespace",      "ezrassor");
-    this->declare_parameter("command_timeout",      1.0);
-    this->declare_parameter("skid_correction",      0.7);
+    this->declare_parameter("command_timeout",        1.0);
+    this->declare_parameter("skid_correction",        0.7);
+    // How long (s) wheel_instructions suppress /cmd_vel after a manual command.
+    // Prevents Nav2 from immediately overriding a manual stop or direction.
+    this->declare_parameter("manual_priority_timeout", 2.0);
 
-    this->get_parameter("wheel_port",           wheel_port_);
-    this->get_parameter("drum_port",            drum_port_);
-    this->get_parameter("baud_rate",            baud_rate_);
-    this->get_parameter("wheel_base",           wheel_base_);
-    this->get_parameter("max_linear_velocity",  max_linear_velocity_);
-    this->get_parameter("max_angular_velocity", max_angular_velocity_);
-    this->get_parameter("update_rate",          update_rate_);
-    this->get_parameter("rover_namespace",      rover_namespace_);
-    this->get_parameter("command_timeout",      command_timeout_);
-    this->get_parameter("skid_correction",      skid_correction_);
+    this->get_parameter("wheel_port",              wheel_port_);
+    this->get_parameter("drum_port",               drum_port_);
+    this->get_parameter("baud_rate",               baud_rate_);
+    this->get_parameter("wheel_base",              wheel_base_);
+    this->get_parameter("max_linear_velocity",     max_linear_velocity_);
+    this->get_parameter("max_angular_velocity",    max_angular_velocity_);
+    this->get_parameter("update_rate",             update_rate_);
+    this->get_parameter("rover_namespace",         rover_namespace_);
+    this->get_parameter("command_timeout",         command_timeout_);
+    this->get_parameter("skid_correction",         skid_correction_);
+    this->get_parameter("manual_priority_timeout", manual_priority_timeout_);
 
     const std::string ns = "/" + rover_namespace_;
 
@@ -133,6 +137,7 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
 
     odometry_state_.last_update = this->now();
     last_command_time_          = this->now();
+    last_manual_cmd_time_       = rclcpp::Time(0, 0, RCL_SYSTEM_TIME); // epoch = never
 
     RCLCPP_INFO(this->get_logger(),
         "SerialMotorController started\n"
@@ -225,11 +230,22 @@ void SerialMotorController::sendDrum(uint8_t cmd)
 void SerialMotorController::applyWheelCommands(double lin_x, double ang_z)
 {
     uint8_t cmd;
-    if (lin_x == 0.0 && ang_z == 0.0) cmd = SerialCmd::STOP;
-    else if (lin_x > 0.0)             cmd = SerialCmd::FWD;
-    else if (lin_x < 0.0)             cmd = SerialCmd::REV;
-    else if (ang_z > 0.0)             cmd = SerialCmd::LEFT;
-    else                               cmd = SerialCmd::RIGHT;
+    if (std::abs(lin_x) < 0.01 && std::abs(ang_z) < 0.01) {
+        cmd = SerialCmd::STOP;
+    } else if (lin_x < 0.0 && std::abs(lin_x) < 0.08) {
+        // Dead-band: block Nav2 backup recovery (typically -0.05 m/s).
+        // The Arduino firmware has no concept of slow reverse — any REV byte
+        // starts the slow-ramp sequence regardless of requested magnitude.
+        cmd = SerialCmd::STOP;
+    } else if (lin_x > 0.0) {
+        cmd = SerialCmd::FWD;
+    } else if (lin_x < 0.0) {
+        cmd = SerialCmd::REV;
+    } else if (ang_z > 0.0) {
+        cmd = SerialCmd::LEFT;
+    } else {
+        cmd = SerialCmd::RIGHT;
+    }
     sendWheel(cmd);
 }
 
@@ -259,6 +275,16 @@ void SerialMotorController::applyDrumCommand(double lin_x)
 
 void SerialMotorController::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
+    // wheel_instructions (manual) takes priority — ignore Nav2 cmd_vel for
+    // manual_priority_timeout seconds after any manual command is received.
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const double since_manual = (this->now() - last_manual_cmd_time_).seconds();
+        if (since_manual < manual_priority_timeout_) {
+            return;
+        }
+    }
+
     const double lin = std::clamp(msg->linear.x,  -max_linear_velocity_,  max_linear_velocity_);
     const double ang = std::clamp(msg->angular.z, -max_angular_velocity_, max_angular_velocity_);
 
@@ -285,8 +311,9 @@ void SerialMotorController::wheelInstructionsCallback(const geometry_msgs::msg::
         std::lock_guard<std::mutex> lock(state_mutex_);
         motor_state_.linear_velocity  = lin;
         motor_state_.angular_velocity = ang;
-        last_command_time_ = this->now();
-        commands_active_   = true;
+        last_command_time_      = this->now();
+        last_manual_cmd_time_   = this->now();  // suppress /cmd_vel for priority timeout
+        commands_active_        = true;
     }
 
     applyWheelCommands(lin, ang);

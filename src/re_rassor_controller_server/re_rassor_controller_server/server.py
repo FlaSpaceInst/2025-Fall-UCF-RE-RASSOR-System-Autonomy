@@ -110,6 +110,8 @@ _depth_img_counter = 0
 _subscribers       = set()         # active WebSocket subscription types
 _sub_lock          = threading.Lock()
 _latest_odom       = None          # last odom payload dict, updated every message
+_nav_proc          = None          # subprocess handle for active ros2 action send_goal
+_nav_lock          = threading.Lock()
 
 
 def _get_ip_address():
@@ -365,15 +367,33 @@ def main(passed_args=None):
     def default_get():
         return jsonify({'status': 200, 'node': NODE_NAME, 'ws_port': 5000})
 
+    def _cancel_nav():
+        """Kill the active Nav2 goal subprocess so Nav2 stops publishing /cmd_vel."""
+        global _nav_proc
+        with _nav_lock:
+            if _nav_proc is not None and _nav_proc.poll() is None:
+                _nav_proc.terminate()
+                node.get_logger().info('Nav2 goal cancelled (manual override)')
+            _nav_proc = None
+
     # ── POST / — main command endpoint ───────────────────────────────────────
     @app.route('/', methods=['POST'])
     def handle_request():
         try:
             data = request.get_json()
+
+            # Legacy allStop format: {wheel_instruction: "none", ...}
+            if isinstance(data, dict) and data.get('wheel_instruction') == 'none':
+                _cancel_nav()
+                stop = geometry_msgs.msg.Twist()
+                wheel_pub.publish(stop)
+                return jsonify({'status': 200})
+
             server.verify(data)
             cmd = server.create_command(data)
 
             if cmd.wheel_action is not None:
+                _cancel_nav()   # manual wheel command preempts any active Nav2 goal
                 msg = geometry_msgs.msg.Twist()
                 msg.linear.x  = float(cmd.wheel_action.linear_x)
                 msg.angular.z = float(cmd.wheel_action.angular_z)
@@ -458,12 +478,15 @@ def main(passed_args=None):
                 f'      z: {qz}\n'
                 f'      w: {qw}\n'
             )
-            subprocess.Popen([
-                'ros2', 'action', 'send_goal',
-                '/navigate_to_pose',
-                'nav2_msgs/action/NavigateToPose',
-                goal_yaml,
-            ])
+            global _nav_proc
+            _cancel_nav()   # cancel any existing goal before sending a new one
+            with _nav_lock:
+                _nav_proc = subprocess.Popen([
+                    'ros2', 'action', 'send_goal',
+                    '/navigate_to_pose',
+                    'nav2_msgs/action/NavigateToPose',
+                    goal_yaml,
+                ])
             node.get_logger().info(
                 f'Navigate: map goal x={x:.3f} y={y:.3f} theta={theta:.3f}')
             return jsonify({'status': 200, 'x': x, 'y': y, 'theta': theta})
@@ -471,6 +494,15 @@ def main(passed_args=None):
         except Exception as e:
             node.get_logger().error(f'/navigate error: {e}')
             return jsonify({'status': 500, 'error': str(e)}), 500
+
+    # ── POST /stop — force-stop: cancel Nav2 goal + halt wheels ─────────────
+    @app.route('/stop', methods=['POST'])
+    def handle_stop():
+        _cancel_nav()
+        stop = geometry_msgs.msg.Twist()
+        wheel_pub.publish(stop)
+        node.get_logger().info('Force stop — Nav2 cancelled, wheels halted')
+        return jsonify({'status': 200})
 
     # ── POST /calibrate ───────────────────────────────────────────────────────
     calibrate_client = node.create_client(std_srvs.srv.Trigger, CALIBRATE_SERVICE)

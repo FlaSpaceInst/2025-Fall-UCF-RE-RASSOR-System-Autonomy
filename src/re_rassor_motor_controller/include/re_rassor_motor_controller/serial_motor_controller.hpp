@@ -146,6 +146,8 @@ private:
     SerialOdometryState odometry_state_;
     mutable std::mutex  state_mutex_;
     rclcpp::Time        last_command_time_;
+    rclcpp::Time        last_manual_cmd_time_;   // tracks last wheel_instructions msg
+    double              manual_priority_timeout_; // seconds manual override suppresses /cmd_vel
     std::atomic<bool>   commands_active_;
 
     // ── Serial file descriptors ──────────────────────────────────────────────

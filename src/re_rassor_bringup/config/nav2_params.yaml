@@ -43,7 +43,7 @@ controller_server:
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.2
       use_collision_detection: false
-      use_rotate_to_heading: true
+      use_rotate_to_heading: false
       allow_reversing: false
 
 local_costmap:

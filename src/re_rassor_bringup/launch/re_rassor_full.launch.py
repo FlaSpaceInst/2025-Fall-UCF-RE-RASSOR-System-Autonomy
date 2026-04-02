@@ -191,7 +191,7 @@ def generate_launch_description():
                 "wheel_odom_topic":  "/odometry/wheel",
                 "visual_odom_topic": "/odom",
                 "fused_odom_topic":  "/odometry/fused",
-                "visual_weight":     0.3,
+                "visual_weight":     0.0,  # pure wheel; visual used only by fallback timer
             }],
         )],
     )

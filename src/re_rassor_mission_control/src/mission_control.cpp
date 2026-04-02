@@ -306,19 +306,36 @@ private:
   void visualOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
   {
     const double w = visual_weight_;
-    if (w < 1e-6) {
-      have_visual_ = true;
-      return;
-    }
-
     const rclcpp::Time stamp(msg->header.stamp, RCL_SYSTEM_TIME);
 
     std::lock_guard<std::mutex> lock(odom_mutex_);
 
-    visual_pose_.x = msg->pose.pose.position.x;
-    visual_pose_.y = msg->pose.pose.position.y;
-    visual_pose_.yaw = tf2::getYaw(msg->pose.pose.orientation);
+    // Always update visual_pose_ — even when visual_weight=0 the fallback timer
+    // needs it. Detect RTAB-Map resets (sudden jump >2 m to near-origin) and
+    // reject them so a tracking loss doesn't corrupt the fused estimate.
+    const double new_x   = msg->pose.pose.position.x;
+    const double new_y   = msg->pose.pose.position.y;
+    const double new_yaw = tf2::getYaw(msg->pose.pose.orientation);
+
+    const bool near_reset = (std::abs(new_x) < 0.05 && std::abs(new_y) < 0.05);
+    const double dist_from_fused = std::hypot(new_x - fused_pose_.x,
+                                              new_y - fused_pose_.y);
+    if (near_reset && dist_from_fused > 0.5 && have_visual_) {
+      // Visual odom reset to origin while fused says we're >0.5 m away — reject.
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000,
+          "Visual odom reset detected (visual=(%.2f,%.2f) fused=(%.2f,%.2f)) — ignoring",
+          new_x, new_y, fused_pose_.x, fused_pose_.y);
+      return;
+    }
+
+    visual_pose_.x   = new_x;
+    visual_pose_.y   = new_y;
+    visual_pose_.yaw = new_yaw;
     have_visual_ = true;
+
+    if (w < 1e-6) {
+      return;   // visual_pose_ updated for fallback; don't blend into fused
+    }
 
     fused_pose_.x = (1.0 - w) * wheel_pose_.x + w * visual_pose_.x;
     fused_pose_.y = (1.0 - w) * wheel_pose_.y + w * visual_pose_.y;
@@ -537,7 +554,7 @@ private:
         //   translation = rotate(-map_yaw_offset) * (-origin.x, -origin.y)
         //   rotation    = -map_yaw_offset
 
-    const double map_yaw = origin.yaw - M_PI / 2.0;      // rover +Y = map +X
+    const double map_yaw = origin.yaw;      // map +X = robot forward at calibration heading
 
         // Compute the map->odom translation (inverse of odom->map)
     const double cos_y = std::cos(-map_yaw);

@@ -232,10 +232,12 @@ void SerialMotorController::applyWheelCommands(double lin_x, double ang_z)
     uint8_t cmd;
     if (std::abs(lin_x) < 0.01 && std::abs(ang_z) < 0.01) {
         cmd = SerialCmd::STOP;
-    } else if (lin_x < 0.0 && std::abs(lin_x) < 0.08) {
-        // Dead-band: block Nav2 backup recovery (typically -0.05 m/s).
-        // The Arduino firmware has no concept of slow reverse — any REV byte
-        // starts the slow-ramp sequence regardless of requested magnitude.
+    } else if (lin_x < 0.0 && std::abs(lin_x) < 0.08 && std::abs(ang_z) < 0.01) {
+        // Dead-band: block slow Nav2 backup recovery (typically -0.05 m/s) when
+        // there is no meaningful angular component. The Arduino firmware has no
+        // concept of slow reverse — any REV byte starts the slow-ramp sequence.
+        // Angular-only commands (lin in dead-band but ang significant) fall through
+        // to the rotation cases below so they are not silently dropped.
         cmd = SerialCmd::STOP;
     } else if (lin_x > 0.0) {
         cmd = SerialCmd::FWD;
@@ -293,8 +295,11 @@ void SerialMotorController::cmdVelCallback(const geometry_msgs::msg::Twist::Shar
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        motor_state_.linear_velocity  = lin;
-        motor_state_.angular_velocity = ang;
+        // If the dead-band will suppress this command (slow backup, no angular),
+        // store 0 velocity so the odom model doesn't integrate phantom motion.
+        const bool dead_banded = (lin < 0.0 && std::abs(lin) < 0.08 && std::abs(ang) < 0.01);
+        motor_state_.linear_velocity  = dead_banded ? 0.0 : lin;
+        motor_state_.angular_velocity = dead_banded ? 0.0 : ang;
         last_command_time_ = this->now();
         commands_active_   = true;
     }

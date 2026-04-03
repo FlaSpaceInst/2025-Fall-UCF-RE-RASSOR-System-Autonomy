@@ -141,6 +141,7 @@ behavior_server:
       plugin: "nav2_behaviors/Spin"
     backup:
       plugin: "nav2_behaviors/BackUp"
+      backup_vel: -0.10   # must exceed dead-band threshold (0.08 m/s) in serial_motor_controller
     drive_on_heading:
       plugin: "nav2_behaviors/DriveOnHeading"
     wait:

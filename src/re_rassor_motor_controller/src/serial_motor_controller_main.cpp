@@ -4,7 +4,11 @@
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<re_rassor::SerialMotorController>());
+  // MultiThreadedExecutor prevents serial I/O in cmdVelCallback from blocking
+  // the 50 Hz odometry timer, which would cause /odometry/wheel to go silent.
+  rclcpp::executors::MultiThreadedExecutor exec;
+  exec.add_node(std::make_shared<re_rassor::SerialMotorController>());
+  exec.spin();
   rclcpp::shutdown();
   return 0;
 }

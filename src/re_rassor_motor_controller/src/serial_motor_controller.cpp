@@ -425,10 +425,15 @@ void SerialMotorController::updateOdometry()
         odometry_state_.y,
         odometry_state_.theta);
 
-    if (dt <= 0.0 || dt > 1.0) {
+    if (dt <= 0.0) {
+        return;  // clock went backwards — skip
+    }
+    if (dt > 1.0) {
+        // Timer fired late (ARM under RTAB-Map/Nav2 load) — clamp so we still
+        // publish wheel odom rather than skipping entirely and causing wheel=DEAD.
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-            "Odom skipped bad dt=%.4f", dt);
-        return;
+            "Odom late dt=%.4f — clamping to 1.0s", dt);
+        dt = 1.0;
     }
 
     // Skid-steer ICR model

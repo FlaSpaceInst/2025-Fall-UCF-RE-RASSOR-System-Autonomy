@@ -234,7 +234,7 @@ private:
   bool               have_visual_ = false;
 
     // dt tracking for wheel integration
-  rclcpp::Time                    last_wheel_stamp_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time                    last_wheel_stamp_{0, 0, RCL_SYSTEM_TIME};
   geometry_msgs::msg::Twist       last_wheel_twist_;   // saved for fallback publish
 
     // -- Calibration -------------------------------------------------------
@@ -271,7 +271,9 @@ private:
     // ---------------------------------------------------------------------
   void wheelOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
   {
-    const rclcpp::Time stamp(msg->header.stamp, RCL_ROS_TIME);
+    // Use node clock directly — avoids RCL_ROS_TIME vs RCL_SYSTEM_TIME mismatch
+    // when computing (this->now() - last_wheel_stamp_) in the fallback timer.
+    const rclcpp::Time stamp = this->now();
 
     std::lock_guard<std::mutex> lock(odom_mutex_);
 
@@ -306,7 +308,7 @@ private:
   void visualOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
   {
     const double w = visual_weight_;
-    const rclcpp::Time stamp(msg->header.stamp, RCL_ROS_TIME);
+    const rclcpp::Time stamp = this->now();
 
     std::lock_guard<std::mutex> lock(odom_mutex_);
 

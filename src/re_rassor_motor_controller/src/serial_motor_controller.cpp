@@ -137,7 +137,7 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
 
     odometry_state_.last_update = this->now();
     last_command_time_          = this->now();
-    last_manual_cmd_time_       = rclcpp::Time(0, 0, RCL_SYSTEM_TIME); // epoch = never
+    last_manual_cmd_time_       = rclcpp::Time(0, 0, this->get_clock()->get_clock_type()); // epoch = never
 
     RCLCPP_INFO(this->get_logger(),
         "SerialMotorController started\n"

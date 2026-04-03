@@ -209,6 +209,7 @@ def main(passed_args=None):
     routine_pub    = node.create_publisher(std_msgs.msg.Int8,       ROUTINE_TOPIC,    QUEUE_SIZE)
     goal_pub       = node.create_publisher(
         geometry_msgs.msg.PoseStamped, GOAL_POSE_TOPIC, QUEUE_SIZE)
+    cmd_vel_pub    = node.create_publisher(geometry_msgs.msg.Twist, '/cmd_vel', QUEUE_SIZE)
 
     # ── ROS → WebSocket bridge subscribers ───────────────────────────────────
 
@@ -329,6 +330,13 @@ def main(passed_args=None):
             })
         except Exception as e:
             node.get_logger().warning(f'depth_image WS emit error: {e}')
+
+    def _wheel_instr_cb(msg):
+        """Relay wheel_instructions to /cmd_vel so manual commands override Nav2."""
+        cmd_vel_pub.publish(msg)
+
+    wheel_instr_relay_sub = node.create_subscription(
+        geometry_msgs.msg.Twist, WHEEL_TOPIC, _wheel_instr_cb, QUEUE_SIZE)
 
     # Create ROS subscribers for streaming topics
     odom_sub      = node.create_subscription(Odometry,      ODOM_TOPIC,                _odom_cb,        10)
@@ -498,6 +506,7 @@ def main(passed_args=None):
         _cancel_nav()
         stop = geometry_msgs.msg.Twist()
         wheel_pub.publish(stop)
+        cmd_vel_pub.publish(stop)   # override any in-flight Nav2 /cmd_vel
         node.get_logger().info('Force stop — Nav2 cancelled, wheels halted')
         return jsonify({'status': 200})
 

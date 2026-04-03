@@ -130,10 +130,16 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
         "/motor_controller/serial_status", 10);
 
     // ── Odometry timer ────────────────────────────────────────────────────
+    // Use a dedicated callback group so the odom timer runs in its own thread
+    // and cannot be blocked by a slow serial write in cmdVelCallback.
+    // MultiThreadedExecutor (in main) is required for this to take effect.
+    auto odom_cb_group = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
     auto period = std::chrono::duration<double>(1.0 / update_rate_);
     update_timer_ = this->create_wall_timer(
         std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-        std::bind(&SerialMotorController::updateOdometry, this));
+        std::bind(&SerialMotorController::updateOdometry, this),
+        odom_cb_group);
 
     odometry_state_.last_update = this->now();
     last_command_time_          = this->now();

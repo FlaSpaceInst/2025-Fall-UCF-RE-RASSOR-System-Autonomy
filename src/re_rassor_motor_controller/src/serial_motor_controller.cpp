@@ -157,7 +157,10 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
 
 int SerialMotorController::openSerial(const std::string& port, int baud)
 {
-    int fd = ::open(port.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+    // O_NONBLOCK prevents open() from blocking on carrier-detect (CD) when the
+    // Arduino hasn't fully booted yet.  After configuring termios we clear the
+    // flag so subsequent reads/writes use normal blocking semantics.
+    int fd = ::open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) return -1;
 
     struct termios tty;
@@ -188,6 +191,12 @@ int SerialMotorController::openSerial(const std::string& port, int baud)
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         ::close(fd);
         return -1;
+    }
+
+    // Clear O_NONBLOCK now that termios is configured — we want blocking writes.
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
     // Toggle DTR to reset Arduino (mirrors pyserial's open() behaviour).

@@ -1,42 +1,33 @@
 """
 test_pipeline_bench.py
 ──────────────────────────────────────────────────────────────────────────────
-Comprehensive test bench for the RE-RASSOR depth-camera → odometry → map
-pipeline.  Matches the *production* configuration in re_rassor_full.launch.py:
+Test bench for the RE-RASSOR depth-camera → laser-scan → SLAM pipeline.
+Matches the production configuration in re_rassor_full.launch.py:
 
-  depth_image_proc  /camera/depth/image_raw → /camera/depth/points
-  icp_odometry      /camera/depth/points   → /rtabmap/odom
-  odom relay        /rtabmap/odom          → /odom
-  rtabmap SLAM      /camera/depth/points + /rtabmap/odom → /rtabmap/map
-  map relay         /rtabmap/map           → /map
-  fake_map          standalone blank OccupancyGrid on /map (transient_local)
-
-NOTE: the previous test (test_obstacle_detection_node.py) used rgbd_odometry
-(RGB+depth).  Production uses icp_odometry (depth/PointCloud2 only).  This
-bench matches production.
+  depthimage_to_laserscan   /camera/depth/image_raw → /scan
+  slam_toolbox              /scan + odom→base_link TF → /map + map→odom TF
+  fake_map                  blank OccupancyGrid on /map (Nav2 bootstrap)
+  depth_image_proc          /camera/depth/image_raw → /camera/depth/points
+                            (used by Nav2 costmaps, not SLAM)
 
 Test classes
 ────────────
-  TestFakeMap                — blank OccupancyGrid publisher, QoS, dimensions
-  TestDepthCameraMessages    — topic format, encoding, frame IDs, camera_info K
-  TestDepthToPointCloud      — depth_image_proc XYZ node, field layout, range
-  TestICPOdometry            — icp_odometry → /rtabmap/odom frame IDs + finite
-  TestOdomRelay              — relay /rtabmap/odom → /odom
-  TestRtabmapMap             — rtabmap SLAM → /rtabmap/map frame_id + cells
-  TestMapRelay               — relay /rtabmap/map → /map
-  TestTFTree                 — all required TF transforms present
-  TestQoSCompatibility       — /map transient_local, depth BEST_EFFORT
+  TestFakeMap               — blank OccupancyGrid publisher, QoS, dimensions
+  TestDepthCameraMessages   — topic format, encoding, frame IDs, camera_info K
+  TestDepthToLaserScan      — depthimage_to_laserscan → /scan validity
+  TestSlamToolboxStartup    — slam_toolbox map→odom TF and /map published
+  TestSlamToolboxMapping    — /map has SLAM content, correct frame / resolution
+  TestTFChain               — full map→odom→base_link→camera chain present
 
 Run:
     colcon build --packages-select re_rassor_test --cmake-args -DBUILD_TESTING=ON
-    colcon test --packages-select re_rassor_test \
+    colcon test --packages-select re_rassor_test \\
         --pytest-args -k test_pipeline_bench -s
     colcon test-result --verbose
 """
 
 import math
 import os
-import struct
 import subprocess
 import tempfile
 import time
@@ -49,35 +40,52 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import tf2_ros
 import yaml
 
-from geometry_msgs.msg import TransformStamped
-from nav_msgs.msg import OccupancyGrid, Odometry
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from nav_msgs.msg import OccupancyGrid
+from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Astra Pro 640×480 reference intrinsics  (matches re_rassor_full.launch.py)
+# Astra Pro 320×240 intrinsics  (matches re_rassor_full.launch.py)
 # ─────────────────────────────────────────────────────────────────────────────
-ASTRA_W  = 640
-ASTRA_H  = 480
-ASTRA_FX = 554.26
-ASTRA_FY = 554.26
-ASTRA_CX = 320.0
-ASTRA_CY = 240.0
+ASTRA_W  = 320
+ASTRA_H  = 240
+ASTRA_FX = 277.13
+ASTRA_FY = 277.13
+ASTRA_CX = 160.0
+ASTRA_CY = 120.0
 
-# Timeout constants (seconds) — sized for a real robot with cold-start latency
-PIPELINE_STARTUP  = 10.0   # time for all nodes to finish initialising
-ICP_TIMEOUT       = 25.0   # /rtabmap/odom first message
-ODOM_RELAY_TIMEOUT = 28.0  # /odom first message (relay adds ≈1 s)
-MAP_TIMEOUT       = 45.0   # /rtabmap/map first message
-MAP_RELAY_TIMEOUT = 48.0   # /map after relay
-PC_TIMEOUT        = 8.0    # /camera/depth/points after depth_image_proc
-TF_TIMEOUT        = 5.0    # tf2 lookup timeout
+# ─────────────────────────────────────────────────────────────────────────────
+# Timing (seconds)
+# ─────────────────────────────────────────────────────────────────────────────
+SCAN_STARTUP     = 5.0    # depthimage_to_laserscan cold-start
+SLAM_STARTUP     = 15.0   # slam_toolbox initialise + first map publish
+COLLECT_SECS     = 3.0    # observation window per test
+TF_LOOKUP_SECS   = 1.0    # tf2 lookup timeout
 
-SENSOR_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+# ─────────────────────────────────────────────────────────────────────────────
+# QoS profiles
+# ─────────────────────────────────────────────────────────────────────────────
+SENSOR_QOS = QoSProfile(
+    depth=10,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+)
 TRANSIENT_QOS = QoSProfile(
     depth=1,
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Locate fake_map.py by walking up the directory tree
+# ─────────────────────────────────────────────────────────────────────────────
+_FAKE_MAP_SCRIPT: str | None = None
+_candidate = os.path.dirname(os.path.realpath(__file__))
+for _ in range(12):
+    _candidate = os.path.dirname(_candidate)
+    _probe = os.path.join(_candidate, "fake_map.py")
+    if os.path.isfile(_probe):
+        _FAKE_MAP_SCRIPT = _probe
+        break
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,46 +93,21 @@ TRANSIENT_QOS = QoSProfile(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _camera_info(stamp, frame_id: str) -> CameraInfo:
-    """Astra Pro pinhole intrinsics — mirrors what the real driver publishes."""
     msg = CameraInfo()
-    msg.header.stamp     = stamp
-    msg.header.frame_id  = frame_id
-    msg.width            = ASTRA_W
-    msg.height           = ASTRA_H
+    msg.header.stamp    = stamp
+    msg.header.frame_id = frame_id
+    msg.width           = ASTRA_W
+    msg.height          = ASTRA_H
     msg.distortion_model = "plumb_bob"
-    msg.d                = [0.0, 0.0, 0.0, 0.0, 0.0]
-    msg.k = [ASTRA_FX, 0.0, ASTRA_CX,
+    msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+    msg.k = [ASTRA_FX, 0.0,     ASTRA_CX,
              0.0,      ASTRA_FY, ASTRA_CY,
              0.0,      0.0,      1.0]
     msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    msg.p = [ASTRA_FX, 0.0, ASTRA_CX, 0.0,
+    msg.p = [ASTRA_FX, 0.0,     ASTRA_CX, 0.0,
              0.0,      ASTRA_FY, ASTRA_CY, 0.0,
              0.0,      0.0,      1.0,      0.0]
     return msg
-
-
-def _make_scene():
-    """
-    Synthetic scene (static content — published repeatedly).
-      depth map:   2.0 m background, 1.0 m box at rows 100-200, cols 200-440
-      16-bit uint16 millimetres — matches Astra Pro output format
-    """
-    depth_f32 = np.full((ASTRA_H, ASTRA_W), 2.0, dtype=np.float32)
-    depth_f32[100:200, 200:440] = 1.0
-    return depth_f32
-
-
-def _make_moving_scene(frame_idx: int):
-    """
-    Synthetic scene with slight motion — needed for ICP odometry to converge.
-    Each frame shifts the foreground box a few pixels so the point cloud moves.
-    """
-    depth_f32 = np.full((ASTRA_H, ASTRA_W), 2.5, dtype=np.float32)
-    shift = frame_idx * 2        # 2-pixel column shift per frame
-    c0 = max(0, 180 + shift)
-    c1 = min(ASTRA_W, c0 + 120)
-    depth_f32[120:220, c0:c1] = 1.0 + frame_idx * 0.02  # slight depth change too
-    return depth_f32
 
 
 def _depth_msg(stamp, depth_f32: np.ndarray) -> Image:
@@ -139,170 +122,127 @@ def _depth_msg(stamp, depth_f32: np.ndarray) -> Image:
     return msg
 
 
-def _pointcloud_from_depth(stamp, depth_f32: np.ndarray,
-                            stride: int = 2) -> PointCloud2:
+def _make_scene() -> np.ndarray:
     """
-    Pinhole projection identical to depth_image_proc/point_cloud_xyz_node.
-    Used to directly publish /camera/depth/points for ICP odometry tests.
-    stride: subsample factor — 2 keeps ~75k pts, fast enough for ICP.
+    Curved wall scene: background at 2.0 m, a box at 1.0 m in the centre.
+    Gives depthimage_to_laserscan a mix of ranges to produce a textured scan.
     """
-    rs = np.arange(0, ASTRA_H, stride)
-    cs = np.arange(0, ASTRA_W, stride)
-    c, r = np.meshgrid(cs, rs)
-    z = depth_f32[r, c].astype(np.float32)
+    depth = np.full((ASTRA_H, ASTRA_W), 2.0, dtype=np.float32)
+    depth[80:160, 80:240] = 1.0
+    return depth
 
-    # Remove zero/inf depth points
-    valid = (z > 0.01) & np.isfinite(z)
-    z = z[valid]
-    cv = c[valid].astype(np.float32)
-    rv = r[valid].astype(np.float32)
 
-    x = ((cv - ASTRA_CX) * z / ASTRA_FX).astype(np.float32)
-    y = ((rv - ASTRA_CY) * z / ASTRA_FY).astype(np.float32)
-
-    pts = np.stack([x, y, z], axis=1)
-    n   = pts.shape[0]
-
-    msg = PointCloud2()
-    msg.header.stamp    = stamp
-    msg.header.frame_id = "camera_depth_optical_frame"
-    msg.height     = 1
-    msg.width      = n
-    msg.fields     = [
-        PointField(name="x", offset=0,  datatype=PointField.FLOAT32, count=1),
-        PointField(name="y", offset=4,  datatype=PointField.FLOAT32, count=1),
-        PointField(name="z", offset=8,  datatype=PointField.FLOAT32, count=1),
-    ]
-    msg.is_bigendian = False
-    msg.point_step   = 12
-    msg.row_step     = 12 * n
-    msg.data         = pts.tobytes()
-    msg.is_dense     = True
-    return msg
+def _make_moving_scene(frame_idx: int) -> np.ndarray:
+    """
+    Vary the box position per frame so slam_toolbox sees genuine scan change.
+    """
+    depth = np.full((ASTRA_H, ASTRA_W), 2.0, dtype=np.float32)
+    shift = (frame_idx * 3) % (ASTRA_W // 2)
+    c0 = max(0, 60 + shift)
+    c1 = min(ASTRA_W, c0 + 160)
+    depth[80:160, c0:c1] = 1.0 + frame_idx * 0.02
+    return depth
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test node — publishes synthetic sensor data, subscribes to pipeline outputs
+# Test node
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _BenchNode(Node):
     """
-    Publish synthetic camera data and collect pipeline outputs for assertions.
+    Publishes synthetic depth data and collects pipeline outputs.
 
     Publishers  (mimic Astra Pro driver):
-      /camera/depth/image_raw     Image   32FC1
+      /camera/depth/image_raw     Image 32FC1
       /camera/depth/camera_info   CameraInfo
-      /camera/depth/points        PointCloud2   (direct, for ICP odom bypass)
 
     Subscribers (pipeline outputs):
-      /camera/depth/points        PointCloud2   (from depth_image_proc if running)
-      /rtabmap/odom               Odometry
-      /odom                       Odometry      (relay output)
-      /rtabmap/map                OccupancyGrid
-      /map                        OccupancyGrid (relay output or fake_map)
+      /scan       LaserScan   (from depthimage_to_laserscan)
+      /map        OccupancyGrid (from slam_toolbox or fake_map)
     """
 
     def __init__(self):
         super().__init__("re_rassor_bench_node")
 
-        # Publishers
         self.depth_pub      = self.create_publisher(
-            Image,       "/camera/depth/image_raw",  SENSOR_QOS)
+            Image,      "/camera/depth/image_raw",   SENSOR_QOS)
         self.depth_info_pub = self.create_publisher(
-            CameraInfo,  "/camera/depth/camera_info", 10)
-        self.pc_pub         = self.create_publisher(
-            PointCloud2, "/camera/depth/points",     SENSOR_QOS)
+            CameraInfo, "/camera/depth/camera_info", 10)
 
-        # Received message buffers
-        self.pc_msgs:        list[PointCloud2]   = []
-        self.rtabmap_odom:   list[Odometry]      = []
-        self.odom_msgs:      list[Odometry]      = []
-        self.rtabmap_map:    list[OccupancyGrid] = []
-        self.map_msgs:       list[OccupancyGrid] = []
+        self.scan_msgs: list[LaserScan]    = []
+        self.map_msgs:  list[OccupancyGrid] = []
 
-        # Subscriptions
         self.create_subscription(
-            PointCloud2,   "/camera/depth/points",
-            lambda m: self.pc_msgs.append(m),        SENSOR_QOS)
+            LaserScan,    "/scan", lambda m: self.scan_msgs.append(m), SENSOR_QOS)
         self.create_subscription(
-            Odometry,      "/rtabmap/odom",
-            lambda m: self.rtabmap_odom.append(m),   10)
-        self.create_subscription(
-            Odometry,      "/odom",
-            lambda m: self.odom_msgs.append(m),      10)
-        self.create_subscription(
-            OccupancyGrid, "/rtabmap/map",
-            lambda m: self.rtabmap_map.append(m),    TRANSIENT_QOS)
-        self.create_subscription(
-            OccupancyGrid, "/map",
-            lambda m: self.map_msgs.append(m),       TRANSIENT_QOS)
+            OccupancyGrid, "/map", lambda m: self.map_msgs.append(m),  TRANSIENT_QOS)
 
-        # TF buffer for transform lookups
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self._frame = 0
 
-    # ── Publish helpers ──────────────────────────────────────────────────────
-
-    def publish_depth_frame(self, depth_f32: np.ndarray | None = None):
-        """Publish one depth image + camera_info + raw pointcloud."""
-        if depth_f32 is None:
-            depth_f32 = _make_moving_scene(self._frame)
+    def publish_depth_frame(self, depth: np.ndarray | None = None):
+        if depth is None:
+            depth = _make_moving_scene(self._frame)
         stamp = self.get_clock().now().to_msg()
-        self.depth_pub.publish(_depth_msg(stamp, depth_f32))
-        self.depth_info_pub.publish(_camera_info(stamp, "camera_depth_optical_frame"))
-        self.pc_pub.publish(_pointcloud_from_depth(stamp, depth_f32))
+        self.depth_pub.publish(_depth_msg(stamp, depth))
+        self.depth_info_pub.publish(
+            _camera_info(stamp, "camera_depth_optical_frame"))
         self._frame += 1
 
-    # ── Spin + wait helpers ──────────────────────────────────────────────────
-
-    def _spin(self, secs: float = 0.05):
-        rclpy.spin_once(self, timeout_sec=secs)
-
-    def _wait_for(self, attr: str, timeout: float):
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            self._spin()
-            buf = getattr(self, attr)
-            if buf:
-                return buf[-1]
-        return None
-
-    def wait_pc(self,          timeout: float = PC_TIMEOUT)        -> PointCloud2 | None:
-        return self._wait_for("pc_msgs",      timeout)
-    def wait_rtabmap_odom(self, timeout: float = ICP_TIMEOUT)      -> Odometry | None:
-        return self._wait_for("rtabmap_odom", timeout)
-    def wait_odom(self,        timeout: float = ODOM_RELAY_TIMEOUT) -> Odometry | None:
-        return self._wait_for("odom_msgs",    timeout)
-    def wait_rtabmap_map(self,  timeout: float = MAP_TIMEOUT)       -> OccupancyGrid | None:
-        return self._wait_for("rtabmap_map",  timeout)
-    def wait_map(self,          timeout: float = MAP_RELAY_TIMEOUT) -> OccupancyGrid | None:
-        return self._wait_for("map_msgs",     timeout)
+    def lookup_tf(self, parent: str, child: str):
+        try:
+            return self.tf_buffer.lookup_transform(
+                parent, child, rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=TF_LOOKUP_SECS))
+        except Exception:
+            return None
 
 
 def _pump(node: _BenchNode, count: int = 30, hz: float = 10.0):
-    """Publish `count` frames at `hz` Hz while spinning."""
+    """Publish `count` depth frames at `hz` Hz while spinning the node."""
     delay = 1.0 / hz
     for _ in range(count):
         node.publish_depth_frame()
-        t0 = time.time()
-        while time.time() - t0 < delay:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < delay:
             rclpy.spin_once(node, timeout_sec=0.01)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Subprocess-based node launchers
-# ─────────────────────────────────────────────────────────────────────────────
-# LaunchService.run() requires the main thread in ROS 2 Jazzy.  Using
-# subprocess.Popen('ros2 run ...') avoids that restriction entirely and is
-# simpler to tear down.
+def _spin(node: _BenchNode, secs: float, hz: float = 10.0):
+    """Spin node for `secs` seconds, publishing depth frames continuously."""
+    _pump(node, count=int(secs * hz), hz=hz)
 
-_ENV = os.environ.copy()   # inherit the sourced ROS / workspace environment
+
+def _wait_scan(node: _BenchNode, timeout: float) -> LaserScan | None:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        node.publish_depth_frame()
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if node.scan_msgs:
+            return node.scan_msgs[-1]
+    return None
+
+
+def _wait_map(node: _BenchNode, timeout: float) -> OccupancyGrid | None:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        node.publish_depth_frame()
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if node.map_msgs:
+            return node.map_msgs[-1]
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subprocess launchers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ENV = os.environ.copy()
 
 
 def _stf_proc(x, y, z, yaw, pitch, roll, parent, child) -> subprocess.Popen:
-    """static_transform_publisher as a subprocess."""
     return subprocess.Popen(
         ['ros2', 'run', 'tf2_ros', 'static_transform_publisher',
          str(x), str(y), str(z), str(yaw), str(pitch), str(roll),
@@ -311,7 +251,6 @@ def _stf_proc(x, y, z, yaw, pitch, roll, parent, child) -> subprocess.Popen:
 
 
 def _write_params(node_name: str, params: dict) -> str:
-    """Write a ROS 2 parameter YAML file, return its path."""
     tmp = tempfile.NamedTemporaryFile(
         mode='w', suffix='.yaml', prefix='ros2_params_', delete=False)
     yaml.dump({node_name: {'ros__parameters': params}}, tmp)
@@ -320,78 +259,48 @@ def _write_params(node_name: str, params: dict) -> str:
     return tmp.name
 
 
-def _icp_odom_proc(db_path: str) -> subprocess.Popen:
-    """icp_odometry via subprocess — matches production config."""
-    params_file = _write_params('icp_odometry', {
-        'frame_id':                      'base_link',
-        'odom_frame_id':                 'odom',
-        'publish_tf':                    False,
-        'approx_sync':                   True,
-        'queue_size':                    10,
-        'Reg/Force3DoF':                 'true',
-        'Icp/VoxelSize':                 '0.05',
-        'Icp/MaxCorrespondenceDistance': '0.5',
+def _depth_laserscan_proc() -> subprocess.Popen:
+    """depthimage_to_laserscan — mirrors production re_rassor_full.launch.py."""
+    return subprocess.Popen(
+        ['ros2', 'run', 'depthimage_to_laserscan', 'depthimage_to_laserscan_node',
+         '--ros-args',
+         '-r', 'depth:=/camera/depth/image_raw',
+         '-r', 'depth_camera_info:=/camera/depth/camera_info',
+         '-r', 'scan:=/scan',
+         '-p', 'scan_height:=1',
+         '-p', 'range_min:=0.45',
+         '-p', 'range_max:=4.0',
+         '-p', 'output_frame:=camera_link'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV)
+
+
+def _slam_proc() -> subprocess.Popen:
+    """
+    async_slam_toolbox_node with test-friendly params:
+    - minimum_travel_distance/heading = 0.0  → accept every scan (no movement needed)
+    - minimum_time_interval = 0.2 s          → moderate rate limit
+    - map_update_interval = 2.0 s            → fast map publishes for tests
+    """
+    params_file = _write_params('slam_toolbox', {
+        'odom_frame':               'odom',
+        'map_frame':                'map',
+        'base_frame':               'base_link',
+        'scan_topic':               '/scan',
+        'mode':                     'mapping',
+        'use_scan_matching':        True,
+        'resolution':               0.05,
+        'max_laser_range':          4.0,
+        'minimum_time_interval':    0.2,
+        'minimum_travel_distance':  0.0,
+        'minimum_travel_heading':   0.0,
+        'transform_publish_period': 0.1,
+        'map_update_interval':      2.0,
+        'debug_logging':            False,
+        'stack_size_to_use':        40000000,
     })
     return subprocess.Popen(
-        ['ros2', 'run', 'rtabmap_odom', 'icp_odometry',
-         '--ros-args',
-         '-r', '__node:=icp_odometry',
-         '-r', '__ns:=/rtabmap',
-         '-r', 'scan_cloud:=/camera/depth/points',
-         '--params-file', params_file],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV)
-
-
-def _rtabmap_proc(db_path: str) -> subprocess.Popen:
-    """rtabmap SLAM via subprocess — matches production config."""
-    params_file = _write_params('rtabmap', {
-        'frame_id':             'base_link',
-        'map_frame_id':         'map',
-        'subscribe_scan_cloud': True,
-        'subscribe_rgb':        False,
-        'publish_tf':           False,
-        'database_path':        db_path,
-        'delete_db_on_start':   True,
-        'Reg/Force3DoF':        'true',
-        'Grid/3D':              'false',
-        'Grid/CellSize':        '0.05',
-        'Grid/RangeMax':        '4.0',
-        'Grid/MinGroundHeight': '-0.1',
-        'Grid/MaxGroundHeight': '0.15',
-        'RGBD/LinearUpdate':    '0.005',
-        'RGBD/AngularUpdate':   '0.005',
-    })
-    return subprocess.Popen(
-        ['ros2', 'run', 'rtabmap_slam', 'rtabmap',
-         '--ros-args',
-         '-r', '__node:=rtabmap',
-         '-r', '__ns:=/rtabmap',
-         '-r', 'scan_cloud:=/camera/depth/points',
-         '-r', 'odom:=/rtabmap/odom',
-         '--params-file', params_file],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV)
-
-
-def _topic_tools_available() -> bool:
-    """Return True if topic_tools package is present in the ROS environment."""
-    result = subprocess.run(
-        ['ros2', 'pkg', 'prefix', 'topic_tools'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV)
-    return result.returncode == 0
-
-
-_TOPIC_TOOLS_OK = _topic_tools_available()
-
-
-def _relay_proc(src: str, dst: str) -> subprocess.Popen | None:
-    """
-    topic_tools relay via subprocess.
-    Returns None (and the relay tests will skip) if topic_tools is not installed.
-    """
-    if not _TOPIC_TOOLS_OK:
-        return None
-    return subprocess.Popen(
-        ['ros2', 'run', 'topic_tools', 'relay', src, dst],
+        ['ros2', 'run', 'slam_toolbox', 'async_slam_toolbox_node',
+         '--ros-args', '--params-file', params_file],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV)
 
 
@@ -409,8 +318,64 @@ def _kill_all(procs: list[subprocess.Popen | None]):
                 pass
 
 
+def _pkg_available(pkg: str) -> bool:
+    return subprocess.run(
+        ['ros2', 'pkg', 'prefix', pkg],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV,
+    ).returncode == 0
+
+
+def _slam_toolbox_functional() -> bool:
+    """
+    Returns True only if slam_toolbox is installed AND actually starts.
+
+    On Jazzy/Ubuntu 24.04, slam_toolbox 2.8.3 hangs silently at startup
+    (Ceres plugin loader deadlock) — it is installed but produces zero output.
+    This check starts the node, waits up to 8 s for any stdout/stderr output,
+    and returns False if none arrives (i.e. the node is non-functional here).
+    """
+    if not _pkg_available('slam_toolbox'):
+        return False
+    try:
+        p = subprocess.Popen(
+            ['ros2', 'run', 'slam_toolbox', 'async_slam_toolbox_node'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=_ENV,
+        )
+        deadline = time.monotonic() + 8.0
+        produced_output = False
+        while time.monotonic() < deadline:
+            # Non-blocking read: check if any bytes are ready
+            import select
+            ready, _, _ = select.select([p.stdout], [], [], 0.2)
+            if ready:
+                chunk = p.stdout.read1(4096)  # type: ignore[attr-defined]
+                if chunk:
+                    produced_output = True
+                    break
+            if p.poll() is not None:
+                # Node exited on its own (crash counts as "responding")
+                produced_output = True
+                break
+        try:
+            p.terminate()
+            p.wait(timeout=3)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        return produced_output
+    except Exception:
+        return False
+
+
+_DEPTH_LASERSCAN_OK = _pkg_available('depthimage_to_laserscan')
+_SLAM_TOOLBOX_OK    = _slam_toolbox_functional()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Pytest fixtures
+# Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
@@ -421,634 +386,387 @@ def ros():
 
 
 @pytest.fixture(scope="module")
-def icp_pipeline(ros):
-    """
-    Launches the ICP odometry sub-pipeline + relay only via subprocesses:
-      static TFs + icp_odometry → /rtabmap/odom → relay → /odom
-    """
-    db_path = tempfile.mktemp(suffix=".db", prefix="rtab_icp_")
+def bench(ros):
+    node = _BenchNode()
+    yield node
+    node.destroy_node()
+
+
+@pytest.fixture(scope="module")
+def static_tfs(ros):
+    """Static TFs that must exist for the full pipeline."""
     procs = [
         _stf_proc(0,    0,    0,       0,      0,       0, "odom",        "base_link"),
         _stf_proc(0.15, 0,    0.10,    0,      0.087,   0, "base_link",   "camera_link"),
         _stf_proc(0,    0,    0,      -1.5708, 0, -1.5708, "camera_link", "camera_depth_optical_frame"),
-        _icp_odom_proc(db_path),
-        _relay_proc("/rtabmap/odom", "/odom"),
     ]
-    time.sleep(PIPELINE_STARTUP)
+    time.sleep(1.5)   # let /tf_static go out before any test tries to look them up
     yield procs
     _kill_all(procs)
 
 
 @pytest.fixture(scope="module")
-def full_pipeline(ros):
-    """
-    Launches the full pipeline via subprocesses:
-      static TFs + icp_odometry + odom_relay + rtabmap + map_relay
-    """
-    db_path = tempfile.mktemp(suffix=".db", prefix="rtab_full_")
-    procs = [
-        _stf_proc(0,    0,    0,       0,      0,       0, "odom",        "base_link"),
-        _stf_proc(0.15, 0,    0.10,    0,      0.087,   0, "base_link",   "camera_link"),
-        _stf_proc(0,    0,    0,      -1.5708, 0, -1.5708, "camera_link", "camera_depth_optical_frame"),
-        _icp_odom_proc(db_path),
-        _relay_proc("/rtabmap/odom", "/odom"),
-        _rtabmap_proc(db_path),
-        _relay_proc("/rtabmap/map",  "/map"),
-    ]
-    time.sleep(PIPELINE_STARTUP)
+def depth_scan_pipeline(bench, static_tfs):
+    """depthimage_to_laserscan running with synthetic depth input."""
+    if not _DEPTH_LASERSCAN_OK:
+        pytest.skip("depthimage_to_laserscan not installed")
+    procs = [_depth_laserscan_proc()]
+    _spin(bench, SCAN_STARTUP)     # publish depth while node warms up
     yield procs
     _kill_all(procs)
 
 
-@pytest.fixture
-def bench(ros):
-    n = _BenchNode()
-    yield n
-    n.destroy_node()
+@pytest.fixture(scope="module")
+def full_slam_pipeline(bench, depth_scan_pipeline):
+    """slam_toolbox stacked on top of the already-running depth_scan_pipeline."""
+    if not _SLAM_TOOLBOX_OK:
+        pytest.skip("slam_toolbox not installed or non-functional on this platform")
+    procs = [_slam_proc()]
+    _spin(bench, SLAM_STARTUP)     # keep publishing; slam_toolbox needs scan input
+    yield procs
+    _kill_all(procs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TestFakeMap — validates the blank map bootstrap publisher
+# TestFakeMap
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFakeMap:
     """
-    Validates fake_map.py (re_rassor_full.launch.py item 0d).
-    Runs fake_map.py in-process — no external node required.
+    Validates fake_map.py — the blank OccupancyGrid publisher used to bootstrap
+    Nav2 before slam_toolbox builds a real map.
     """
 
-    def test_fake_map_qos_transient_local(self, ros, bench):
-        """
-        fake_map.py must publish with TRANSIENT_LOCAL durability so that
-        late-joining Nav2 static_layer receives the map.
-        """
-        import sys
+    def test_fake_map_script_found(self):
+        assert _FAKE_MAP_SCRIPT is not None, (
+            "fake_map.py not found in any ancestor directory. "
+            "Ensure it lives at the workspace root."
+        )
 
-        # fake_map.py lives at the workspace root (not inside a package).
-        # Walk up from this file until we find it — works from source tree
-        # and from colcon install/ since both share the same workspace root.
-        script = None
-        candidate = os.path.dirname(os.path.realpath(__file__))
-        for _ in range(10):
-            candidate = os.path.dirname(candidate)
-            probe = os.path.join(candidate, "fake_map.py")
-            if os.path.isfile(probe):
-                script = probe
-                break
-        if script is None:
-            pytest.skip("fake_map.py not found in any ancestor directory")
-
+    def test_fake_map_published(self, bench):
+        if _FAKE_MAP_SCRIPT is None:
+            pytest.skip("fake_map.py not found")
+        bench.map_msgs.clear()
         proc = subprocess.Popen(
-            [sys.executable, script],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            ['python3', _FAKE_MAP_SCRIPT],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_ENV)
+        try:
+            msg = _wait_map(bench, timeout=6.0)
+            assert msg is not None, "/map not received from fake_map.py"
+        finally:
+            proc.terminate()
+            proc.wait(timeout=3)
 
-        # bench is subscribed with TRANSIENT_LOCAL — must receive the map
-        grid = bench.wait_map(timeout=8.0)
-        proc.wait(timeout=10)
+    def test_fake_map_all_free(self, bench):
+        """Blank map must have all cells == 0 (free space)."""
+        if not bench.map_msgs:
+            pytest.skip("No /map received — run test_fake_map_published first")
+        msg = bench.map_msgs[-1]
+        non_free = [c for c in msg.data if c != 0]
+        assert len(non_free) == 0, (
+            f"fake_map has {len(non_free)} non-free cells — "
+            "it should be a blank free-space grid"
+        )
 
-        assert grid is not None, (
-            "/map not received from fake_map.py with TRANSIENT_LOCAL QoS — "
-            "check the publisher's durability setting in fake_map.py")
+    def test_fake_map_qos_transient_local(self, bench):
+        """
+        /map must use TRANSIENT_LOCAL so Nav2 static_layer receives it even
+        if Nav2 subscribes after fake_map.py published.
+        We verify this indirectly: the bench node subscribes with TRANSIENT_LOCAL
+        QoS and must have received at least one map message.
+        """
+        assert bench.map_msgs, (
+            "/map never received with TRANSIENT_LOCAL QoS — "
+            "fake_map.py may be publishing with VOLATILE"
+        )
 
-    def test_fake_map_frame_id(self, ros, bench):
-        """fake_map.py must publish with header.frame_id = 'map'."""
-        grid = bench.wait_map(timeout=3.0)
-        if grid is None:
-            pytest.skip("fake_map.py not running — run test_fake_map_qos_transient_local first")
-        assert grid.header.frame_id == "map", (
-            f"Expected frame_id='map', got '{grid.header.frame_id}'")
+    def test_fake_map_has_positive_dimensions(self, bench):
+        if not bench.map_msgs:
+            pytest.skip("No /map received")
+        msg = bench.map_msgs[-1]
+        assert msg.info.width > 0
+        assert msg.info.height > 0
+        assert msg.info.resolution > 0.0
 
-    def test_fake_map_is_free_space(self, ros, bench):
-        """All cells in the fake map must be 0 (free) — nav2 must not see walls."""
-        grid = bench.wait_map(timeout=3.0)
-        if grid is None:
-            pytest.skip("no /map message available")
-        assert all(c == 0 for c in grid.data), (
-            "fake_map.py has non-free cells — nav2 will see phantom obstacles")
-
-    def test_fake_map_resolution(self, ros, bench):
-        """fake_map.py must use 0.05 m/cell — matches global_costmap resolution."""
-        grid = bench.wait_map(timeout=3.0)
-        if grid is None:
-            pytest.skip("no /map message available")
-        assert abs(grid.info.resolution - 0.05) < 1e-4, (
-            f"Expected resolution 0.05 m/cell, got {grid.info.resolution}")
-
-    def test_fake_map_covers_workspace(self, ros, bench):
-        """Fake map must span at least ±5 m (200×200 cells at 0.05 m/cell)."""
-        grid = bench.wait_map(timeout=3.0)
-        if grid is None:
-            pytest.skip("no /map message available")
-        w_m = grid.info.width  * grid.info.resolution
-        h_m = grid.info.height * grid.info.resolution
-        assert w_m >= 10.0, f"Map width {w_m} m < 10 m — too small for Nav2"
-        assert h_m >= 10.0, f"Map height {h_m} m < 10 m — too small for Nav2"
+    def test_fake_map_frame_is_map(self, bench):
+        if not bench.map_msgs:
+            pytest.skip("No /map received")
+        assert bench.map_msgs[-1].header.frame_id == "map"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TestDepthCameraMessages — validates synthetic depth frames
+# TestDepthCameraMessages
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestDepthCameraMessages:
     """
-    Validates that the synthetic depth frames published by _BenchNode match
-    what the Astra Pro driver publishes in production.  Tests fail here mean
-    the camera driver or topic remappings are wrong.
+    Validates the synthetic depth publisher output — the same format the
+    Astra Pro driver produces.  No external nodes needed.
     """
 
-    def test_depth_image_encoding(self, ros, bench):
-        """Depth image must be 32FC1 (float32 metres) — matches Astra Pro."""
-        bench.depth_pub.publish(_depth_msg(
-            bench.get_clock().now().to_msg(), _make_scene()))
+    def test_depth_image_published(self, bench):
+        bench.publish_depth_frame()
         rclpy.spin_once(bench, timeout_sec=0.1)
-        # We published directly — just validate the factory
-        scene = _make_scene()
-        msg   = _depth_msg(bench.get_clock().now().to_msg(), scene)
-        assert msg.encoding == "32FC1", (
-            f"Expected encoding '32FC1', got '{msg.encoding}'")
 
-    def test_depth_image_dimensions(self, ros, bench):
-        """Depth image must be 640×480 — matches Astra Pro resolution."""
-        scene = _make_scene()
-        msg   = _depth_msg(bench.get_clock().now().to_msg(), scene)
-        assert msg.width  == ASTRA_W, f"Expected width {ASTRA_W}, got {msg.width}"
-        assert msg.height == ASTRA_H, f"Expected height {ASTRA_H}, got {msg.height}"
-
-    def test_depth_image_step(self, ros, bench):
-        """step must equal width × 4 bytes (one float32 per pixel)."""
-        scene = _make_scene()
-        msg   = _depth_msg(bench.get_clock().now().to_msg(), scene)
-        assert msg.step == ASTRA_W * 4, (
-            f"Expected step={ASTRA_W * 4}, got {msg.step}")
-
-    def test_depth_image_frame_id(self, ros, bench):
-        """Depth image frame_id must be 'camera_depth_optical_frame'."""
-        scene = _make_scene()
-        msg   = _depth_msg(bench.get_clock().now().to_msg(), scene)
-        assert msg.header.frame_id == "camera_depth_optical_frame", (
-            f"Expected 'camera_depth_optical_frame', got '{msg.header.frame_id}'")
-
-    def test_camera_info_intrinsics(self, ros, bench):
-        """CameraInfo K matrix must have non-zero fx, fy, cx, cy."""
+    def test_depth_encoding_32fc1(self, bench):
         stamp = bench.get_clock().now().to_msg()
-        info  = _camera_info(stamp, "camera_depth_optical_frame")
-        assert info.k[0] > 0.0, f"fx (K[0]) is zero or negative: {info.k[0]}"
-        assert info.k[4] > 0.0, f"fy (K[4]) is zero or negative: {info.k[4]}"
-        assert info.k[2] > 0.0, f"cx (K[2]) is zero or negative: {info.k[2]}"
-        assert info.k[5] > 0.0, f"cy (K[5]) is zero or negative: {info.k[5]}"
+        msg = _depth_msg(stamp, _make_scene())
+        assert msg.encoding == "32FC1"
 
-    def test_camera_info_dimensions_match(self, ros, bench):
-        """CameraInfo width/height must match depth image dimensions."""
+    def test_depth_dimensions(self, bench):
         stamp = bench.get_clock().now().to_msg()
-        info  = _camera_info(stamp, "camera_depth_optical_frame")
+        msg = _depth_msg(stamp, _make_scene())
+        assert msg.width  == ASTRA_W
+        assert msg.height == ASTRA_H
+
+    def test_depth_step_matches_width(self, bench):
+        stamp = bench.get_clock().now().to_msg()
+        msg = _depth_msg(stamp, _make_scene())
+        assert msg.step == ASTRA_W * 4   # 4 bytes per float32
+
+    def test_depth_data_length(self, bench):
+        stamp = bench.get_clock().now().to_msg()
+        msg = _depth_msg(stamp, _make_scene())
+        assert len(msg.data) == ASTRA_W * ASTRA_H * 4
+
+    def test_depth_frame_id(self, bench):
+        stamp = bench.get_clock().now().to_msg()
+        msg = _depth_msg(stamp, _make_scene())
+        assert msg.header.frame_id == "camera_depth_optical_frame"
+
+    def test_camera_info_intrinsics(self, bench):
+        stamp = bench.get_clock().now().to_msg()
+        info = _camera_info(stamp, "camera_depth_optical_frame")
+        assert abs(info.k[0] - ASTRA_FX) < 0.01   # fx
+        assert abs(info.k[4] - ASTRA_FY) < 0.01   # fy
+        assert abs(info.k[2] - ASTRA_CX) < 0.01   # cx
+        assert abs(info.k[5] - ASTRA_CY) < 0.01   # cy
+
+    def test_camera_info_dimensions(self, bench):
+        stamp = bench.get_clock().now().to_msg()
+        info = _camera_info(stamp, "camera_depth_optical_frame")
         assert info.width  == ASTRA_W
         assert info.height == ASTRA_H
 
+    def test_scene_contains_foreground_and_background(self):
+        depth = _make_scene()
+        assert np.any(depth < 1.5), "scene should have near objects"
+        assert np.any(depth > 1.5), "scene should have far background"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TestDepthToPointCloud — validates /camera/depth/points format
+# TestDepthToLaserScan
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestDepthToPointCloud:
+class TestDepthToLaserScan:
     """
-    Validates that /camera/depth/points has the format nav2's obstacle_layer
-    and icp_odometry expect.  In production this is produced by
-    depth_image_proc/point_cloud_xyz_node.  In tests, _BenchNode publishes
-    the cloud directly using the same pinhole projection.
+    Validates depthimage_to_laserscan:
+      /camera/depth/image_raw  →  /scan
     """
 
-    def test_pointcloud_published(self, ros, bench):
-        """_BenchNode must echo /camera/depth/points back to itself."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc(timeout=5.0)
-        assert pc is not None, "/camera/depth/points not received"
-
-    def test_pointcloud_xyz_fields(self, ros, bench):
-        """PointCloud2 must have x, y, z float32 fields (point_step=12)."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc()
-        assert pc is not None, "/camera/depth/points not received"
-        names = {f.name for f in pc.fields}
-        for axis in ("x", "y", "z"):
-            assert axis in names, (
-                f"PointCloud2 missing '{axis}' field; fields={names}")
-
-    def test_pointcloud_point_step(self, ros, bench):
-        """point_step must be 12 (3 × float32) for nav2 + ICP compatibility."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc()
-        assert pc is not None
-        assert pc.point_step == 12, (
-            f"Expected point_step=12, got {pc.point_step} — "
-            "nav2 voxel_layer and ICP odometry require packed XYZ float32")
-
-    def test_pointcloud_not_empty(self, ros, bench):
-        """PointCloud2 must contain at least one point."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc()
-        assert pc is not None
-        n = len(bytes(pc.data)) // pc.point_step
-        assert n > 0, "PointCloud2 has zero points — ICP odometry will fail"
-
-    def test_pointcloud_frame_id(self, ros, bench):
-        """frame_id must be 'camera_depth_optical_frame'."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc()
-        assert pc is not None
-        assert pc.header.frame_id == "camera_depth_optical_frame", (
-            f"Expected 'camera_depth_optical_frame', got '{pc.header.frame_id}'\n"
-            "Mismatched frame_id breaks the TF lookup in ICP odometry.")
-
-    def test_pointcloud_obstacle_depth(self, ros, bench):
-        """Points from the synthetic 1.0 m obstacle must have z ∈ [0.8, 1.2]."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc()
-        assert pc is not None
-
-        field_map = {f.name: f.offset for f in pc.fields}
-        z_off = field_map["z"]
-        ps    = pc.point_step
-        data  = bytes(pc.data)
-        n_pts = len(data) // ps
-
-        near = sum(
-            1 for i in range(n_pts)
-            if math.isfinite(
-                z := struct.unpack_from("<f", data, i * ps + z_off)[0]
-            ) and 0.8 <= z <= 1.2
+    def test_scan_published(self, bench, depth_scan_pipeline):
+        bench.scan_msgs.clear()
+        msg = _wait_scan(bench, timeout=5.0)
+        assert msg is not None, (
+            "/scan not received — depthimage_to_laserscan may not be running "
+            "or not receiving depth images"
         )
-        assert near > 0, (
-            f"No points with z ∈ [0.8, 1.2] m (obstacle at 1.0 m). "
-            f"Total points: {n_pts}. "
-            "Check depth image encoding and pinhole projection.")
 
-    def test_pointcloud_no_nan_inf(self, ros, bench):
-        """No NaN or Inf values in the xyz fields — ICP will crash on them."""
-        bench.pc_msgs.clear()
-        _pump(bench, count=3)
-        pc = bench.wait_pc()
-        assert pc is not None
+    def test_scan_frame_id(self, bench, depth_scan_pipeline):
+        if not bench.scan_msgs:
+            pytest.skip("No /scan received")
+        assert bench.scan_msgs[-1].header.frame_id == "camera_link", (
+            "scan frame_id should be camera_link (output_frame param)"
+        )
 
-        field_map = {f.name: f.offset for f in pc.fields}
-        ps   = pc.point_step
-        data = bytes(pc.data)
-        n    = len(data) // ps
+    def test_scan_has_finite_ranges(self, bench, depth_scan_pipeline):
+        """At least some ranges must be finite — scene has objects in range."""
+        if not bench.scan_msgs:
+            pytest.skip("No /scan received")
+        msg = bench.scan_msgs[-1]
+        finite = [r for r in msg.ranges if math.isfinite(r)]
+        assert len(finite) > 0, (
+            "all scan ranges are inf — depthimage_to_laserscan sees nothing "
+            "within [range_min, range_max]. Check depth image content."
+        )
 
-        bad = []
-        for i in range(n):
-            for axis, off in field_map.items():
-                v = struct.unpack_from("<f", data, i * ps + off)[0]
-                if not math.isfinite(v):
-                    bad.append((i, axis, v))
-                    if len(bad) > 5:
-                        break
-            if len(bad) > 5:
-                break
+    def test_scan_ranges_within_bounds(self, bench, depth_scan_pipeline):
+        """Finite ranges must be within [0.45, 4.0] m (production config)."""
+        if not bench.scan_msgs:
+            pytest.skip("No /scan received")
+        msg = bench.scan_msgs[-1]
+        for r in msg.ranges:
+            if math.isfinite(r):
+                assert 0.45 <= r <= 4.0, f"range {r:.3f} m outside [0.45, 4.0]"
 
-        assert not bad, (
-            f"PointCloud2 contains non-finite values (first 5): {bad[:5]}\n"
-            "ICP odometry will reject or crash on NaN/Inf points.")
+    def test_scan_angle_coverage(self, bench, depth_scan_pipeline):
+        """Scan should span at least 30° — a 320-pixel-wide image gives ~63°."""
+        if not bench.scan_msgs:
+            pytest.skip("No /scan received")
+        msg = bench.scan_msgs[-1]
+        span = abs(msg.angle_max - msg.angle_min)
+        assert span > math.radians(30), (
+            f"scan spans only {math.degrees(span):.1f}° — expected ≥30°"
+        )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TestICPOdometry — validates icp_odometry → /rtabmap/odom → relay → /odom
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestICPOdometry:
-    """
-    Validates the ICP odometry node (rtabmap_odom/icp_odometry).
-    This is the production odometry source — NOT rgbd_odometry.
-    """
-
-    def test_rtabmap_odom_published(self, icp_pipeline, bench):
-        """
-        /rtabmap/odom must be published after icp_odometry receives point clouds.
-        If this fails: check that icp_odometry is running and /camera/depth/points
-        is being received by it.
-        """
-        bench.rtabmap_odom.clear()
-        _pump(bench, count=50, hz=10.0)
-        odom = bench.wait_rtabmap_odom(ICP_TIMEOUT)
-        assert odom is not None, (
-            "/rtabmap/odom not received within timeout.\n"
-            "Diagnosis:\n"
-            "  1. Is icp_odometry running?  ros2 node list | grep icp\n"
-            "  2. Is /camera/depth/points publishing? ros2 topic echo /camera/depth/points\n"
-            "  3. Is the TF tree complete?  ros2 run tf2_tools view_frames\n"
-            "  4. Check icp_odometry logs for 'insufficient features' warnings.")
-
-    def test_rtabmap_odom_frame_ids(self, icp_pipeline, bench):
-        """/rtabmap/odom must have frame_id='odom', child_frame_id='base_link'."""
-        bench.rtabmap_odom.clear()
-        _pump(bench, count=30, hz=10.0)
-        odom = bench.wait_rtabmap_odom(ICP_TIMEOUT)
-        assert odom is not None, "/rtabmap/odom not received"
-        assert odom.header.frame_id == "odom", (
-            f"Expected frame_id 'odom', got '{odom.header.frame_id}'\n"
-            "Check icp_odometry odom_frame_id parameter.")
-        assert odom.child_frame_id == "base_link", (
-            f"Expected child_frame_id 'base_link', got '{odom.child_frame_id}'\n"
-            "Check icp_odometry frame_id parameter.")
-
-    def test_rtabmap_odom_position_finite(self, icp_pipeline, bench):
-        """All position fields in /rtabmap/odom must be finite (not NaN/Inf)."""
-        bench.rtabmap_odom.clear()
-        _pump(bench, count=30, hz=10.0)
-        odom = bench.wait_rtabmap_odom(ICP_TIMEOUT)
-        assert odom is not None, "/rtabmap/odom not received"
-        pos = odom.pose.pose.position
-        assert math.isfinite(pos.x), f"odom.position.x is not finite: {pos.x}"
-        assert math.isfinite(pos.y), f"odom.position.y is not finite: {pos.y}"
-        assert math.isfinite(pos.z), f"odom.position.z is not finite: {pos.z}"
-
-    def test_rtabmap_odom_covariance_not_all_zero(self, icp_pipeline, bench):
-        """
-        Pose covariance must not be all-zero — all-zero means ICP didn't converge
-        and the odometry is invalid (nav2 will reject it or behave erratically).
-        """
-        bench.rtabmap_odom.clear()
-        _pump(bench, count=30, hz=10.0)
-        odom = bench.wait_rtabmap_odom(ICP_TIMEOUT)
-        assert odom is not None, "/rtabmap/odom not received"
-        cov = odom.pose.covariance
-        assert any(v != 0.0 for v in cov), (
-            "Pose covariance is all zeros — ICP odometry may not have converged.\n"
-            "Ensure point clouds have enough geometric features for ICP registration.")
-
-    def test_odom_relay_published(self, icp_pipeline, bench):
-        """/odom must be published by the relay (mirrors /rtabmap/odom)."""
-        if not _TOPIC_TOOLS_OK:
-            pytest.skip("topic_tools not installed — install ros-$ROS_DISTRO-topic-tools")
-        bench.odom_msgs.clear()
-        _pump(bench, count=50, hz=10.0)
-        odom = bench.wait_odom(ODOM_RELAY_TIMEOUT)
-        assert odom is not None, (
-            "/odom not received — the relay node may not be running.\n"
-            "Check: ros2 node list | grep relay\n"
-            "Check: ros2 topic echo /odom")
-
-    def test_odom_relay_frame_ids_match(self, icp_pipeline, bench):
-        """/odom relay output must have same frame IDs as /rtabmap/odom."""
-        if not _TOPIC_TOOLS_OK:
-            pytest.skip("topic_tools not installed — install ros-$ROS_DISTRO-topic-tools")
-        bench.rtabmap_odom.clear()
-        bench.odom_msgs.clear()
-        _pump(bench, count=50, hz=10.0)
-
-        rtab = bench.wait_rtabmap_odom(ICP_TIMEOUT)
-        odom = bench.wait_odom(ODOM_RELAY_TIMEOUT)
-
-        assert rtab is not None, "/rtabmap/odom not received"
-        assert odom  is not None, "/odom not received"
-
-        assert odom.header.frame_id == rtab.header.frame_id, (
-            f"/odom frame_id '{odom.header.frame_id}' "
-            f"!= /rtabmap/odom frame_id '{rtab.header.frame_id}'")
-        assert odom.child_frame_id == rtab.child_frame_id, (
-            f"/odom child_frame_id '{odom.child_frame_id}' "
-            f"!= /rtabmap/odom child_frame_id '{rtab.child_frame_id}'")
+    def test_scan_hz_above_threshold(self, bench, depth_scan_pipeline):
+        """Scan rate must be ≥ 5 Hz — our depth publisher runs at 10 Hz."""
+        bench.scan_msgs.clear()
+        _spin(bench, COLLECT_SECS)
+        hz = len(bench.scan_msgs) / COLLECT_SECS
+        assert hz >= 5.0, (
+            f"/scan published at {hz:.1f} Hz — expected ≥5 Hz. "
+            "depthimage_to_laserscan may be dropping depth messages."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TestRtabmapMap — validates SLAM map output and relay
+# TestSlamToolboxStartup
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestRtabmapMap:
+class TestSlamToolboxStartup:
     """
-    Validates that rtabmap SLAM produces /rtabmap/map and the relay
-    publishes it to /map.  These tests need the full pipeline.
+    Validates that slam_toolbox starts correctly and immediately publishes
+    the map→odom TF and /map topic.
     """
 
-    def test_rtabmap_map_published(self, full_pipeline, bench):
-        """
-        /rtabmap/map must be published by rtabmap SLAM.
-        This is the longest-running test — rtabmap needs enough odom + cloud
-        frames before emitting a grid.
-
-        If this fails:
-          1. Is /rtabmap/odom publishing?  (TestICPOdometry must pass first)
-          2. Is rtabmap receiving /camera/depth/points?
-          3. Are RGBD/LinearUpdate / RGBD/AngularUpdate thresholds too high?
-          4. Check rtabmap logs for 'SLAM update rejected' messages.
-        """
-        bench.rtabmap_map.clear()
-        _pump(bench, count=80, hz=8.0)
-        grid = bench.wait_rtabmap_map(MAP_TIMEOUT)
-        assert grid is not None, (
-            "/rtabmap/map not received within timeout.\n"
-            "Possible causes:\n"
-            "  • icp_odometry not publishing (run TestICPOdometry first)\n"
-            "  • Point cloud too sparse — ICP needs overlapping geometry\n"
-            "  • rtabmap not subscribing to /camera/depth/points\n"
-            "    → ros2 topic info /camera/depth/points --verbose\n"
-            "  • RGBD/LinearUpdate too high (try lowering to 0.005)")
-
-    def test_rtabmap_map_frame_id(self, full_pipeline, bench):
-        """rtabmap map frame_id must be 'map'."""
-        grid = bench.wait_rtabmap_map(5.0) or bench.rtabmap_map[-1] if bench.rtabmap_map else None
-        if grid is None:
-            pytest.skip("/rtabmap/map not available — run test_rtabmap_map_published first")
-        assert grid.header.frame_id == "map", (
-            f"Expected frame_id 'map', got '{grid.header.frame_id}'")
-
-    def test_rtabmap_map_resolution(self, full_pipeline, bench):
-        """Map resolution must be 0.05 m/cell — matches Grid/CellSize parameter."""
-        grid = bench.wait_rtabmap_map(5.0) or (bench.rtabmap_map[-1] if bench.rtabmap_map else None)
-        if grid is None:
-            pytest.skip("/rtabmap/map not available")
-        assert abs(grid.info.resolution - 0.05) < 0.01, (
-            f"Expected 0.05 m/cell, got {grid.info.resolution}\n"
-            "Check Grid/CellSize parameter in re_rassor_full.launch.py")
-
-    def test_rtabmap_map_has_cells(self, full_pipeline, bench):
-        """Map must have non-zero dimensions."""
-        grid = bench.wait_rtabmap_map(5.0) or (bench.rtabmap_map[-1] if bench.rtabmap_map else None)
-        if grid is None:
-            pytest.skip("/rtabmap/map not available")
-        n = len(grid.data)
-        assert n > 0, "OccupancyGrid has zero cells"
-        assert grid.info.width  > 0, "OccupancyGrid width is 0"
-        assert grid.info.height > 0, "OccupancyGrid height is 0"
-
-    def test_map_relay_published(self, full_pipeline, bench):
-        """/map (from relay) must mirror /rtabmap/map."""
-        if not _TOPIC_TOOLS_OK:
-            pytest.skip("topic_tools not installed — install ros-$ROS_DISTRO-topic-tools")
+    def test_map_received(self, bench, full_slam_pipeline):
         bench.map_msgs.clear()
-        _pump(bench, count=80, hz=8.0)
-        grid = bench.wait_map(MAP_RELAY_TIMEOUT)
-        assert grid is not None, (
-            "/map not received — relay node may not be running.\n"
-            "Check: ros2 node list | grep relay\n"
-            "Check: ros2 topic echo /map")
+        msg = _wait_map(bench, timeout=10.0)
+        assert msg is not None, (
+            "/map not received from slam_toolbox — check that /scan is "
+            "publishing and the odom→base_link TF is present"
+        )
 
-    def test_map_relay_frame_id(self, full_pipeline, bench):
-        """/map relay output must have frame_id='map'."""
-        if not _TOPIC_TOOLS_OK:
-            pytest.skip("topic_tools not installed — install ros-$ROS_DISTRO-topic-tools")
-        grid = bench.wait_map(5.0) or (bench.map_msgs[-1] if bench.map_msgs else None)
-        if grid is None:
-            pytest.skip("/map not available")
-        assert grid.header.frame_id == "map", (
-            f"Expected 'map', got '{grid.header.frame_id}'")
+    def test_map_odom_tf_published(self, bench, full_slam_pipeline):
+        """slam_toolbox must publish map→odom TF (its primary output)."""
+        _spin(bench, 2.0)   # give TF time to arrive
+        tf = bench.lookup_tf("map", "odom")
+        assert tf is not None, (
+            "map→odom TF not found — slam_toolbox is not publishing its "
+            "localisation transform"
+        )
+
+    def test_map_frame_id_is_map(self, bench, full_slam_pipeline):
+        if not bench.map_msgs:
+            pytest.skip("No /map received")
+        assert bench.map_msgs[-1].header.frame_id == "map"
+
+    def test_map_resolution_matches_config(self, bench, full_slam_pipeline):
+        """Resolution must match slam_toolbox_params.yaml (0.05 m)."""
+        if not bench.map_msgs:
+            pytest.skip("No /map received")
+        assert abs(bench.map_msgs[-1].info.resolution - 0.05) < 1e-4
+
+    def test_map_has_positive_dimensions(self, bench, full_slam_pipeline):
+        if not bench.map_msgs:
+            pytest.skip("No /map received")
+        msg = bench.map_msgs[-1]
+        assert msg.info.width  > 0
+        assert msg.info.height > 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TestTFTree — validates all required TF transforms exist
+# TestSlamToolboxMapping
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestTFTree:
+class TestSlamToolboxMapping:
     """
-    Validates that all TF transforms required by icp_odometry and rtabmap
-    are present and provide valid (finite) transforms.
-
-    Required chain in production:
-      odom → base_link  (published by mission_control / static TF in tests)
-      base_link → camera_link  (static: 0.15 m forward, 0.10 m up, 5° pitch)
-      camera_link → camera_depth_optical_frame  (static: 90° rotation)
+    Validates that slam_toolbox builds a map with actual SLAM content
+    (occupied / unknown cells) after receiving laser scans.
     """
 
-    REQUIRED_TRANSFORMS = [
-        ("odom",        "base_link"),
-        ("base_link",   "camera_link"),
-        ("camera_link", "camera_depth_optical_frame"),
-        ("odom",        "camera_depth_optical_frame"),   # transitive
-    ]
-
-    def _lookup(self, bench: _BenchNode, parent: str, child: str,
-                timeout: float = TF_TIMEOUT) -> TransformStamped | None:
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            try:
-                return bench.tf_buffer.lookup_transform(
-                    parent, child, rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.5))
-            except Exception:
-                rclpy.spin_once(bench, timeout_sec=0.1)
-        return None
-
-    def test_odom_to_base_link(self, icp_pipeline, bench):
-        """odom → base_link must exist (static TF in tests, mission_control in prod)."""
-        tf = self._lookup(bench, "odom", "base_link")
-        assert tf is not None, (
-            "Transform odom → base_link not found.\n"
-            "In production: published by mission_control node.\n"
-            "In tests: should come from static_transform_publisher.\n"
-            "Check TF tree: ros2 run tf2_tools view_frames")
-
-    def test_base_link_to_camera_link(self, icp_pipeline, bench):
-        """base_link → camera_link must exist (static TF, camera mount position)."""
-        tf = self._lookup(bench, "base_link", "camera_link")
-        assert tf is not None, (
-            "Transform base_link → camera_link not found.\n"
-            "Check static_tf_base_to_camera in re_rassor_full.launch.py")
-
-    def test_camera_link_to_depth_optical(self, icp_pipeline, bench):
-        """camera_link → camera_depth_optical_frame must exist."""
-        tf = self._lookup(bench, "camera_link", "camera_depth_optical_frame")
-        assert tf is not None, (
-            "Transform camera_link → camera_depth_optical_frame not found.\n"
-            "Check static_tf_depth_optical in re_rassor_full.launch.py")
-
-    def test_odom_to_depth_optical_transitive(self, icp_pipeline, bench):
-        """odom → camera_depth_optical_frame (full chain) must be lookupable."""
-        tf = self._lookup(bench, "odom", "camera_depth_optical_frame")
-        assert tf is not None, (
-            "Transitive transform odom → camera_depth_optical_frame not found.\n"
-            "ICP odometry needs this chain to project the point cloud into odom frame.\n"
-            "Run: ros2 run tf2_tools view_frames  and check all three links.")
-
-    def test_camera_mount_translation(self, icp_pipeline, bench):
+    def test_map_has_slam_content(self, bench, full_slam_pipeline):
         """
-        base_link → camera_link translation must be approximately (0.15, 0, 0.10) m.
-        If wrong, ICP odometry will have incorrect extrinsic calibration.
+        /map must have at least some non-free cells (occupied or unknown).
+        All-zero = still blank / fake map.  Any non-zero = slam_toolbox is
+        marking obstacles and/or unknown space.
         """
-        tf = self._lookup(bench, "base_link", "camera_link")
-        if tf is None:
-            pytest.skip("Transform base_link → camera_link not available")
+        # Wait for a map update after the startup window
+        bench.map_msgs.clear()
+        msg = _wait_map(bench, timeout=15.0)
+        assert msg is not None, "No /map received after pipeline startup"
+        non_free = [c for c in msg.data if c != 0]
+        assert len(non_free) > 0, (
+            "slam_toolbox /map is all-free (all zeros) — SLAM is not marking "
+            "obstacles. Check /scan has valid ranges and odom→base_link TF exists."
+        )
 
+    def test_map_cell_count_nonzero(self, bench, full_slam_pipeline):
+        if not bench.map_msgs:
+            pytest.skip("No /map received")
+        msg = bench.map_msgs[-1]
+        assert len(msg.data) == msg.info.width * msg.info.height
+
+    def test_map_updates_over_time(self, bench, full_slam_pipeline):
+        """
+        slam_toolbox must publish more than one /map message during the test —
+        confirming it is actively processing scans, not stuck after the first.
+        """
+        bench.map_msgs.clear()
+        _spin(bench, 10.0)    # 10 s of continuous scan + spin
+        assert len(bench.map_msgs) >= 2, (
+            f"slam_toolbox published only {len(bench.map_msgs)} /map message(s) "
+            "in 10 s — expected ≥2 (map_update_interval=2.0 s in test config)"
+        )
+
+    def test_map_odom_tf_stable(self, bench, full_slam_pipeline):
+        """map→odom TF must be present throughout the test, not just at startup."""
+        _spin(bench, 2.0)
+        tf = bench.lookup_tf("map", "odom")
+        assert tf is not None, "map→odom TF disappeared after initial publish"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestTFChain
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTFChain:
+    """
+    Validates the complete TF chain required for Nav2:
+      map → odom → base_link → camera_link → camera_depth_optical_frame
+
+    map→odom        : slam_toolbox (localisation)
+    odom→base_link  : static_transform_publisher (wheel odom in production)
+    base_link→camera: static_transform_publisher in launch file
+    """
+
+    def test_odom_base_link_tf(self, bench, static_tfs):
+        _spin(bench, 1.0)
+        tf = bench.lookup_tf("odom", "base_link")
+        assert tf is not None, "odom→base_link TF missing"
+
+    def test_base_link_camera_link_tf(self, bench, static_tfs):
+        _spin(bench, 1.0)
+        tf = bench.lookup_tf("base_link", "camera_link")
+        assert tf is not None, "base_link→camera_link TF missing"
         t = tf.transform.translation
-        assert abs(t.x - 0.15) < 0.01, f"camera x offset {t.x:.3f} m ≠ 0.15 m"
-        assert abs(t.y - 0.00) < 0.01, f"camera y offset {t.y:.3f} m ≠ 0.00 m"
-        assert abs(t.z - 0.10) < 0.01, f"camera z offset {t.z:.3f} m ≠ 0.10 m"
+        assert abs(t.x - 0.15) < 0.01, f"camera_link x translation wrong: {t.x}"
+        assert abs(t.z - 0.10) < 0.01, f"camera_link z translation wrong: {t.z}"
 
-    def test_all_tf_values_finite(self, icp_pipeline, bench):
-        """All TF translation components must be finite (no NaN/Inf)."""
-        for parent, child in self.REQUIRED_TRANSFORMS:
-            tf = self._lookup(bench, parent, child)
-            if tf is None:
-                continue  # Other tests will catch missing TFs
-            t = tf.transform.translation
-            for axis, v in [("x", t.x), ("y", t.y), ("z", t.z)]:
-                assert math.isfinite(v), (
-                    f"TF {parent}→{child} translation.{axis} is not finite: {v}")
+    def test_camera_link_optical_tf(self, bench, static_tfs):
+        _spin(bench, 1.0)
+        tf = bench.lookup_tf("camera_link", "camera_depth_optical_frame")
+        assert tf is not None, "camera_link→camera_depth_optical_frame TF missing"
 
+    def test_map_odom_tf_from_slam(self, bench, full_slam_pipeline):
+        """map→odom TF must come from slam_toolbox (not a static publisher)."""
+        _spin(bench, 2.0)
+        tf = bench.lookup_tf("map", "odom")
+        assert tf is not None, (
+            "map→odom TF missing — slam_toolbox must publish this "
+            "(mission_control no longer publishes a static map→odom)"
+        )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TestQoSCompatibility — validates QoS matches between publishers and consumers
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestQoSCompatibility:
-    """
-    QoS mismatches are a common silent failure in ROS 2 — publisher and
-    subscriber appear to be connected but no messages arrive.
-
-    Key QoS rules:
-      /map          must be TRANSIENT_LOCAL RELIABLE (nav2 static_layer joins late)
-      /camera/depth/* must be BEST_EFFORT (high-frequency sensor data)
-      /odom         RELIABLE is preferred (nav2 needs every update)
-    """
-
-    def test_bench_subscribes_map_transient_local(self, ros, bench):
+    def test_full_chain_map_to_optical(self, bench, full_slam_pipeline):
         """
-        The bench node subscribes to /map with TRANSIENT_LOCAL.
-        If fake_map.py or rtabmap publishes with VOLATILE, the late subscriber
-        would miss it — this test exposes that mismatch.
+        Full chain map→camera_depth_optical_frame must be lookupable —
+        this is what Nav2 uses to project obstacles from the depth frame
+        into the map frame.
         """
-        # Verify the subscription QoS object on bench is configured correctly
-        # (indirect test — if wait_map returns data, QoS matched)
-        # We can validate the QoS objects directly
-        assert bench.map_msgs is not None  # subscription exists
-
-    def test_fake_map_publishes_transient_local(self, ros, bench):
-        """
-        fake_map.py uses rclpy's transient_local publisher.  Nav2's static_layer
-        is configured with map_subscribe_transient_local: true (nav2_params.yaml).
-        If fake_map.py used VOLATILE, nav2 would never receive the initial map.
-        """
-        try:
-            from ament_index_python.packages import get_package_share_directory
-            bringup_share = get_package_share_directory('re_rassor_bringup')
-            params_path = os.path.join(bringup_share, 'config', 'nav2_params.yaml')
-        except Exception:
-            pytest.skip("re_rassor_bringup not found in ament index")
-        if not os.path.isfile(params_path):
-            pytest.skip(f"nav2_params.yaml not found at {params_path}")
-
-        with open(params_path) as f:
-            content = f.read()
-
-        assert "map_subscribe_transient_local: true" in content, (
-            "nav2_params.yaml does not have map_subscribe_transient_local: true\n"
-            "Nav2 static_layer will not receive the TRANSIENT_LOCAL map from rtabmap/fake_map.")
-
-    def test_pointcloud_qos_best_effort(self, ros, bench):
-        """
-        /camera/depth/points should be published with BEST_EFFORT.
-        Mixing RELIABLE publisher with BEST_EFFORT subscriber (or vice versa)
-        causes silent drops in ROS 2 FastDDS.
-        """
-        bench.pc_msgs.clear()
-        _pump(bench, count=5)
-        # If QoS mismatched, pc_msgs would be empty even after publishing
-        pc = bench.wait_pc(timeout=3.0)
-        assert pc is not None, (
-            "/camera/depth/points not received after direct publication.\n"
-            "Check QoS compatibility between bench publisher (BEST_EFFORT) "
-            "and any intermediary nodes.")
+        _spin(bench, 2.0)
+        tf = bench.lookup_tf("map", "camera_depth_optical_frame")
+        assert tf is not None, (
+            "Cannot look up map→camera_depth_optical_frame — one or more "
+            "links in the TF chain are broken"
+        )

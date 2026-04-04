@@ -26,37 +26,33 @@ from rclpy.qos import (
 import tf2_ros
 
 from nav_msgs.msg import OccupancyGrid, Odometry
-from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs.msg import Image, PointCloud2, LaserScan
 from tf2_msgs.msg import TFMessage
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 DEPTH_MIN_HZ    = 5.0    # depth image must publish at least this fast
 PC_MIN_HZ       = 5.0    # pointcloud must publish at least this fast
-ICP_MIN_HZ      = 3.0    # ICP odometry minimum rate
+SCAN_MIN_HZ     = 5.0    # laser scan must publish at least this fast
 
 # Startup grace: if system was just launched, rates will be low.
 # Default collection window is 20 s to give nodes time to warm up.
 DEFAULT_SECS    = 20.0
-ICP_COV_WARN    = 0.5    # covariance diagonal above this = tracking unstable
-ICP_COV_HARD    = 5.0    # above this = hard failure
-PC_MIN_POINTS   = 1000   # fewer points than this = ICP will likely fail
-                         # (320×240 depth gives ~30k-76k valid pts normally)
+PC_MIN_POINTS   = 1000   # fewer points than this = sparse cloud (Nav2 costmap warning)
 
 SERIAL_PORTS = ["/dev/arduino_wheel", "/dev/arduino_drum"]
 
 REQUIRED_NODES = [
-    ("motor_ctrl",   "serial_motor_controller"),
-    ("mission_ctrl", "mission_control"),
-    ("icp_odom",     "icp_odometry"),
-    ("rtabmap",      "rtabmap"),
-    ("controller",   "controller_server"),
-    ("planner",      "planner_server"),
-    ("bt_navigator", "bt_navigator"),
+    ("motor_ctrl",    "serial_motor_controller"),
+    ("mission_ctrl",  "mission_control"),
+    ("slam_toolbox",  "slam_toolbox"),
+    ("controller",    "controller_server"),
+    ("planner",       "planner_server"),
+    ("bt_navigator",  "bt_navigator"),
 ]
 
 OPTIONAL_NODES = [
-    ("odom_relay",   "odom_relay"),
-    ("map_relay",    "map_relay"),
+    ("depth_scan",    "depth_to_laserscan"),
+    ("depth_pc",      "depth_to_pointcloud"),
 ]
 
 TF_CHAIN = [
@@ -90,8 +86,8 @@ class _PreflightNode(Node):
         self.depth_count    = 0
         self.pc_count       = 0
         self.pc_points_max  = 0
-        self.icp_count      = 0
-        self.icp_cov_max    = 0.0
+        self.scan_count     = 0
+        self.scan_ranges_ok = 0      # scans with at least some finite ranges
         self.map_received   = False
         self.map_is_blank   = True   # all-zero = still the fake_map
         self.odom_received  = False
@@ -108,9 +104,9 @@ class _PreflightNode(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-        self.create_subscription(Image,        "/camera/depth/image_raw", self._cb_depth,      sensor_qos)
+        self.create_subscription(Image,         "/camera/depth/image_raw", self._cb_depth,      sensor_qos)
         self.create_subscription(PointCloud2,  "/camera/depth/points",    self._cb_pc,         sensor_qos)
-        self.create_subscription(Odometry,     "/rtabmap/odom",           self._cb_icp,        10)
+        self.create_subscription(LaserScan,    "/scan",                   self._cb_scan,       sensor_qos)
         self.create_subscription(Odometry,     "/odom",                   self._cb_odom,       10)
         self.create_subscription(Odometry,     "/odometry/wheel",         self._cb_wheel_odom, 10)
         self.create_subscription(OccupancyGrid, "/map",                   self._cb_map,        transient_qos)
@@ -126,11 +122,11 @@ class _PreflightNode(Node):
         n = len(bytes(msg.data)) // max(msg.point_step, 1)
         self.pc_points_max = max(self.pc_points_max, n)
 
-    def _cb_icp(self, msg: Odometry):
-        self.icp_count += 1
-        cov   = msg.pose.covariance
-        diag  = [abs(cov[i * 7]) for i in range(6)]
-        self.icp_cov_max = max(self.icp_cov_max, max(diag))
+    def _cb_scan(self, msg: LaserScan):
+        self.scan_count += 1
+        finite = sum(1 for r in msg.ranges if not (r == float('inf') or r != r))
+        if finite > 0:
+            self.scan_ranges_ok += 1
 
     def _cb_odom(self, _):
         self.odom_received = True
@@ -221,31 +217,21 @@ def main():
         results.append((_warn(f"PointCloud   {pc_hz:.1f} Hz < {PC_MIN_HZ} Hz — still warming up, re-run preflight after 30 s if system just started"), False))
         warns += 1
 
-    # ── 4. ICP odometry ───────────────────────────────────────────────────────
-    icp_hz = node.icp_count / elapsed
-    if node.icp_count == 0:
-        results.append((_fail("ICP odom     0 Hz — icp_odometry not running or not receiving pointcloud"), True))
+    # ── 4. Laser scan (/scan from depthimage_to_laserscan) ───────────────────
+    scan_hz = node.scan_count / elapsed
+    if node.scan_count == 0:
+        results.append((_fail("/scan        0 Hz — depthimage_to_laserscan not running or not receiving depth"), True))
         failures += 1
-    elif icp_hz < ICP_MIN_HZ:
-        results.append((_warn(f"ICP odom     {icp_hz:.1f} Hz < {ICP_MIN_HZ} Hz — slow convergence"), False))
+    elif scan_hz < SCAN_MIN_HZ:
+        results.append((_warn(f"/scan        {scan_hz:.1f} Hz < {SCAN_MIN_HZ} Hz — still warming up"), False))
         warns += 1
-    elif node.icp_cov_max > ICP_COV_HARD:
-        results.append((_fail(f"ICP odom     {icp_hz:.1f} Hz  cov={node.icp_cov_max:.2f} — tracking LOST.  Not enough point cloud features"), True))
+    elif node.scan_ranges_ok == 0:
+        results.append((_fail(f"/scan        {scan_hz:.1f} Hz but all ranges are inf — camera not seeing anything in range"), True))
         failures += 1
-    elif node.icp_cov_max > ICP_COV_WARN:
-        results.append((_warn(f"ICP odom     {icp_hz:.1f} Hz  cov={node.icp_cov_max:.2f} — tracking unstable"), False))
-        warns += 1
     else:
-        results.append((_ok(f"ICP odom     {icp_hz:.1f} Hz  cov={node.icp_cov_max:.3f}"), False))
+        results.append((_ok(f"/scan        {scan_hz:.1f} Hz  ({node.scan_ranges_ok}/{node.scan_count} scans with valid ranges)"), False))
 
-    # ── 5. /odom relay ────────────────────────────────────────────────────────
-    if node.odom_received:
-        results.append((_ok("/odom relay  receiving (relay node alive)"), False))
-    else:
-        results.append((_fail("/odom relay  nothing on /odom — odom_relay node dead or topic_tools missing"), True))
-        failures += 1
-
-    # ── 6. Wheel odometry (needed before TF check — explains odom→base_link) ──
+    # ── 5. Wheel odometry (check before TF — explains odom→base_link if missing) ──
     if node.wheel_odom_received:
         results.append((_ok("/odometry/wheel  receiving (Arduino connected)"), False))
     else:
@@ -253,11 +239,19 @@ def main():
                               "Check USB cable and serial_motor_controller node"), True))
         failures += 1
 
-    # ── 7. TF chain ───────────────────────────────────────────────────────────
-    # odom→base_link is published by mission_control (requires wheel odom).
-    # base_link→camera_link and camera_link→camera_depth_optical_frame are
-    # static TFs published by re_rassor_full.launch.py at startup.
+    # ── 6. TF chain ───────────────────────────────────────────────────────────
+    # map→odom      : published by slam_toolbox (localization)
+    # odom→base_link: published by mission_control (wheel odometry)
+    # base_link→camera_link and camera_link→camera_depth_optical_frame:
+    #   static TFs published by re_rassor_full.launch.py at startup.
+    TF_CHAIN = [
+        ("map",         "odom"),
+        ("odom",        "base_link"),
+        ("base_link",   "camera_link"),
+        ("camera_link", "camera_depth_optical_frame"),
+    ]
     TF_SOURCES = {
+        ("map",         "odom"):                           "slam_toolbox (needs /scan + odom TF)",
         ("odom",        "base_link"):                      "mission_control (needs wheel odom)",
         ("base_link",   "camera_link"):                    "static_transform_publisher in launch",
         ("camera_link", "camera_depth_optical_frame"):     "static_transform_publisher in launch",
@@ -270,22 +264,24 @@ def main():
         else:
             source = TF_SOURCES.get((parent, child), "unknown")
             hint = ""
-            if parent == "odom" and not node.wheel_odom_received:
+            if parent == "map" and node.scan_count == 0:
+                hint = " (root cause: /scan not publishing — fix depthimage_to_laserscan first)"
+            elif parent == "odom" and not node.wheel_odom_received:
                 hint = " (root cause: wheel odom dead — fix /odometry/wheel first)"
             results.append((_fail(f"TF {parent}→{child}  MISSING — published by {source}{hint}"), True))
             failures += 1
 
-    # ── 8. /map ───────────────────────────────────────────────────────────────
+    # ── 7. /map ───────────────────────────────────────────────────────────────
     if not node.map_received:
-        results.append((_fail("/map         not received — fake_map.py not running and rtabmap has no map yet"), True))
+        results.append((_fail("/map         not received — fake_map.py not running and slam_toolbox has no map yet"), True))
         failures += 1
     elif node.map_is_blank:
-        results.append((_warn("/map         received but all-free — still on fake_map, rtabmap has not built a real map yet"), False))
+        results.append((_warn("/map         received but all-free — still on fake_map, slam_toolbox has not built a real map yet"), False))
         warns += 1
     else:
-        results.append((_ok("/map         received with SLAM content (rtabmap active)"), False))
+        results.append((_ok("/map         received with SLAM content (slam_toolbox active)"), False))
 
-    # ── 9. Required nodes ─────────────────────────────────────────────────────
+    # ── 8. Required nodes ─────────────────────────────────────────────────────
     node_names = [n for n, _ in node.get_node_names_and_namespaces()]
     for label, ros_name in REQUIRED_NODES:
         if ros_name in node_names:

@@ -40,8 +40,8 @@
  * ---------------
  * This node subscribes to TWO odometry sources:
  *   /odometry/wheel   (nav_msgs/Odometry) -- from motor_controller (fast, drifts)
- *   /odom             (nav_msgs/Odometry) -- from rtabmap rgbd_odometry (slower,
- *                                            loop-closure corrected)
+ *   /odom             (nav_msgs/Odometry) -- visual odometry source (unused,
+ *                                            visual_weight=0.0 in production)
  *
  * It publishes a fused pose on /odometry/fused using a complementary filter:
  *   - Wheel odom provides high-frequency velocity integration between visual frames
@@ -69,7 +69,6 @@
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/utils.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <tf2_ros/static_transform_broadcaster.h>
 
 #include <chrono>
 #include <cmath>
@@ -118,8 +117,7 @@ class MissionControl : public rclcpp::Node
 public:
   MissionControl()
   : Node("mission_control"),
-    calibrated_(false),
-    static_tf_broadcaster_(this)
+    calibrated_(false)
   {
         // -- Parameters ---------------------------------------------------
     declare_parameter("wheel_odom_topic", std::string("/odometry/wheel"));
@@ -144,7 +142,8 @@ public:
             wheel_odom_topic_, 10,
             std::bind(&MissionControl::wheelOdomCallback, this, std::placeholders::_1));
 
-        // Visual odometry from rtabmap rgbd_odometry (slower, loop-corrected)
+        // Visual odometry (unused in production — visual_weight=0.0 — but kept
+        // for the odom fallback timer which fires when wheel odom goes silent)
     visual_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
             visual_odom_topic_, 10,
             std::bind(&MissionControl::visualOdomCallback, this, std::placeholders::_1));
@@ -174,9 +173,6 @@ public:
             "/re_rassor/calibrate",
             std::bind(&MissionControl::calibrateCallback, this,
                       std::placeholders::_1, std::placeholders::_2));
-
-        // -- Broadcast initial identity map->odom until calibrated ---------
-    publishStaticMapToOdom(Pose2D{});
 
         // -- Fallback timer: keep publishing fused odom from visual when wheel is silent --
         // The wheel encoder only sends data while motors are actively driven.
@@ -264,7 +260,6 @@ private:
   rclcpp::TimerBase::SharedPtr odom_fallback_timer_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  tf2_ros::StaticTransformBroadcaster                  static_tf_broadcaster_;
 
     // ---------------------------------------------------------------------
     // Wheel odometry callback -- high-frequency integration
@@ -492,10 +487,10 @@ private:
       calibrated_ = true;
     }
 
-        // Publish the static map->odom transform that defines the calibrated origin.
-        // After this, the map frame origin corresponds to the robot's current position,
-        // and the robot's current heading becomes the rover +Y (forward) direction.
-        publishStaticMapToOdom(current);
+        // slam_toolbox owns the map→odom TF — it publishes this continuously
+        // from its scan-matching result.  We do not publish a static map→odom
+        // here; the calib_origin_map_ pose recorded above is used only by
+        // roverToMap() to convert rover-frame navigation goals to map-frame goals.
 
         // Reset all odometry accumulators to (0,0,0) so that /odometry/fused
         // immediately reports (0,0,0) after calibration.
@@ -519,63 +514,6 @@ private:
     res->message = "Calibrated at (" +
       std::to_string(current.x) + ", " +
       std::to_string(current.y) + ")";
-  }
-
-    // ---------------------------------------------------------------------
-    // Publish static map -> odom transform
-    //
-    // This defines how the map frame is offset/rotated relative to odom.
-    // Before calibration: identity (map == odom).
-    // After calibration:  map origin = robot's pose at calibration time,
-    //                     map +X     = robot's forward at calibration time.
-    // ---------------------------------------------------------------------
-  void publishStaticMapToOdom(const Pose2D & origin)
-  {
-        // The map->odom transform is the INVERSE of the odom-frame pose
-        // of the calibration point.  We want the map-frame origin to be
-        // at the robot's current odom position.
-        //
-        // map->odom:  translate by (-origin.x, -origin.y), rotate by -origin.yaw
-        // But we also want map +X = robot forward (+Y rover convention).
-        // Robot forward in ROS odom is the direction of origin.yaw.
-        // We rotate map by -(origin.yaw - M_PI/2) so that the robot's forward
-        // direction aligns with map +Y... actually keep it simple:
-        //
-        // We define the map frame such that:
-        //   map +X = robot forward at calibration  (= rover +Y)
-        //   map +Y = robot left at calibration     (= rover -X... or +X if we flip)
-        //
-        // To get rover +X=right, +Y=forward in the map frame we need a -90deg rotation
-        // (so that what was map +X becomes rover +Y):
-        //   map_yaw_offset = origin.yaw - M_PI/2
-        //   This makes: map +X aligns with rover +Y (forward)
-        //
-        // The static TF from map->odom is the inverse of odom->map:
-        //   translation = rotate(-map_yaw_offset) * (-origin.x, -origin.y)
-        //   rotation    = -map_yaw_offset
-
-    const double map_yaw = origin.yaw;      // map +X = robot forward at calibration heading
-
-        // Compute the map->odom translation (inverse of odom->map)
-    const double cos_y = std::cos(-map_yaw);
-    const double sin_y = std::sin(-map_yaw);
-    const double tx = -(cos_y * origin.x - sin_y * origin.y);
-    const double ty = -(sin_y * origin.x + cos_y * origin.y);
-
-    geometry_msgs::msg::TransformStamped ts;
-    ts.header.stamp = now();
-    ts.header.frame_id = "map";
-    ts.child_frame_id = "odom";
-
-    ts.transform.translation.x = tx;
-    ts.transform.translation.y = ty;
-    ts.transform.translation.z = 0.0;
-
-    tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, -map_yaw);
-    ts.transform.rotation = tf2::toMsg(q);
-
-    static_tf_broadcaster_.sendTransform(ts);
   }
 
     // ---------------------------------------------------------------------

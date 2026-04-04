@@ -719,14 +719,14 @@ def main(passed_args=None):
 
     @_socketio.on('request_map')
     def on_request_map():
-        """Client can request an immediate map snapshot via service call."""
+        """Client can request an immediate map save via slam_toolbox service."""
         try:
             import subprocess
             subprocess.Popen([
                 'ros2', 'service', 'call',
-                '/rtabmap/publish_map',
-                'rtabmap_msgs/srv/PublishMap',
-                '{global_map: true, optimized: true, graph_only: false}',
+                '/slam_toolbox/save_map',
+                'slam_toolbox/srv/SaveMap',
+                '{name: {data: /tmp/rassor_map}}',
             ])
             emit('map_requested', {'status': 'ok'})
         except Exception as e:

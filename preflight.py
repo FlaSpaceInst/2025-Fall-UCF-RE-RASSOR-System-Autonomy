@@ -40,6 +40,7 @@ DEFAULT_SECS    = 20.0
 ICP_COV_WARN    = 0.5    # covariance diagonal above this = tracking unstable
 ICP_COV_HARD    = 5.0    # above this = hard failure
 PC_MIN_POINTS   = 1000   # fewer points than this = ICP will likely fail
+                         # (320×240 depth gives ~30k-76k valid pts normally)
 
 SERIAL_PORTS = ["/dev/arduino_wheel", "/dev/arduino_drum"]
 

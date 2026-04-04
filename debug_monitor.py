@@ -2,8 +2,8 @@
 """
 RE-RASSOR Debug Monitor
 -----------------------
-Run this on the rover (after sourcing ROS2) to see exactly what Nav2 and
-the controller server are sending in real-time.
+Run this on the rover (after sourcing ROS2) to see Nav2, motor, odometry,
+depth-camera, ICP odometry, and RTAB-Map status in real-time.
 
 Usage:
     python3 debug_monitor.py [--rover-name <name>]
@@ -16,6 +16,7 @@ import argparse
 import math
 import os
 import socket
+import struct
 import time
 from datetime import datetime
 
@@ -24,10 +25,12 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Int8
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import Image, PointCloud2
 from action_msgs.msg import GoalStatusArray
 from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
 from tf2_msgs.msg import TFMessage
+import tf2_ros
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 RESET   = "\033[0m"
@@ -67,6 +70,10 @@ REQUIRED_NODES = [
     ("planner",       "planner_server"),
     ("bt_navigator",  "bt_navigator"),
     ("behavior_srv",  "behavior_server"),
+    ("icp_odom",      "icp_odometry"),
+    ("rtabmap",       "rtabmap"),
+    ("odom_relay",    "odom_relay"),
+    ("map_relay",     "map_relay"),
 ]
 
 # Serial ports we care about
@@ -78,6 +85,19 @@ DEADBAND_ANG_MAX = 0.01   # |ang_z| < this (angular must also be small)
 
 # How long (s) without an odom→base_link TF before we warn
 TF_STALE_WARN_S = 0.5
+
+# ICP covariance threshold — diagonal value above this means ICP lost tracking
+ICP_COV_WARN = 0.5
+
+# How long (s) without a /rtabmap/map update before we warn
+MAP_STALE_WARN_S = 30.0
+
+# TF chain that must exist for the depth pipeline to work
+REQUIRED_TF_CHAIN = [
+    ("odom",        "base_link"),
+    ("base_link",   "camera_link"),
+    ("camera_link", "camera_depth_optical_frame"),
+]
 
 
 def ts() -> str:
@@ -131,21 +151,61 @@ class DebugMonitor(Node):
         self._fused_print_interval = 5.0
         self._last_fused_print     = 0.0
 
+        # ── Depth camera / RTAB-Map state ──────────────────────────────────────
+        # Depth image
+        self._depth_img_count   = 0
+        self._last_depth_time   = 0.0   # monotonic; 0 = never seen
+
+        # PointCloud
+        self._pc_count          = 0
+        self._last_pc_time      = 0.0
+        self._last_pc_n_points  = 0
+
+        # ICP odometry (/rtabmap/odom)
+        self._icp_odom_count    = 0
+        self._last_icp_cov_max  = 0.0   # largest diagonal of pose covariance
+        self._icp_lost_tracking = False  # True when covariance explodes
+
+        # ICP reset detection — mirrors mission_control.cpp near_reset logic
+        self._last_icp_pos      = None  # (x, y) of last accepted ICP message
+        self._icp_reset_count   = 0     # how many resets detected this session
+
+        # RTAB-Map SLAM (/rtabmap/map)
+        self._rtabmap_map_count  = 0
+        self._last_map_time      = 0.0
+        self._last_map_w         = 0
+        self._last_map_h         = 0
+
+        # /map relay output — track whether it's the fake map or a real one
+        self._relay_map_count    = 0
+        self._map_is_fake        = True   # assume fake until rtabmap pushes
+
+        # TF buffer for full-chain checks
+        self._tf_buffer   = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
         print(f"\n{BOLD}{'─'*60}{RESET}")
         print(f"{BOLD}  RE-RASSOR Debug Monitor{RESET}  (rover: {CYAN}{rover_name}{RESET})")
         print(f"{BOLD}{'─'*60}{RESET}")
-        print(f"  Monitoring topics:")
+        print(f"  {BOLD}Nav2 / motor:{RESET}")
         print(f"    {GREEN}/cmd_vel{RESET}               ← Nav2 velocity output")
-        print(f"    {GREEN}/{rover_name}/wheel_instructions{RESET} ← Controller-server stop")
+        print(f"    {GREEN}/{rover_name}/wheel_instructions{RESET} ← motor controller")
         print(f"    {GREEN}/ezrassor/routine_actions{RESET} ← Stop/Dig/Dump signals")
         print(f"    {GREEN}/navigate_to_pose/...{RESET}  ← Nav2 action status + distance")
+        print(f"  {BOLD}Odometry:{RESET}")
         print(f"    {GREEN}/odometry/wheel{RESET}        ← Wheel encoder odometry")
-        print(f"    {GREEN}/odom{RESET}                  ← RTAB-Map visual odometry")
+        print(f"    {GREEN}/rtabmap/odom{RESET}          ← ICP odometry (raw, pre-relay)")
+        print(f"    {GREEN}/odom{RESET}                  ← ICP odometry (post-relay)")
         print(f"    {GREEN}/odometry/fused{RESET}        ← Fused position (what Nav2 uses)")
-        print(f"    {GREEN}/tf{RESET}                    ← odom→base_link TF staleness")
+        print(f"  {BOLD}Depth camera → RTAB-Map pipeline:{RESET}")
+        print(f"    {GREEN}/camera/depth/image_raw{RESET} ← Astra Pro depth frames")
+        print(f"    {GREEN}/camera/depth/points{RESET}   ← depth_image_proc PointCloud2")
+        print(f"    {GREEN}/rtabmap/map{RESET}           ← SLAM map (pre-relay)")
+        print(f"    {GREEN}/map{RESET}                   ← SLAM map (post-relay / fake_map)")
+        print(f"  {BOLD}TF chain:{RESET}  odom→base_link→camera_link→camera_depth_optical_frame")
         print(f"{BOLD}{'─'*60}{RESET}")
-        print(f"  {DIM}Odom pulse counts printed every 10s — zero means that source is dead{RESET}")
-        print(f"  {DIM}Node + serial health printed every 10s{RESET}\n")
+        print(f"  {DIM}Pulse counts + health printed every 10s — zero = dead{RESET}")
+        print(f"  {DIM}ICP covariance spike = lost tracking.  Map stale >{MAP_STALE_WARN_S}s = SLAM stuck{RESET}\n")
 
         # ── Subscriptions ──────────────────────────────────────────────────────
         self.create_subscription(Twist, "/cmd_vel", self._cb_cmd_vel, 10)
@@ -177,9 +237,29 @@ class DebugMonitor(Node):
         )
         self.create_subscription(TFMessage, "/tf", self._cb_tf, tf_qos)
 
+        # ── Depth camera / RTAB-Map subscriptions ──────────────────────────────
+        sensor_qos = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        transient_qos = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        self.create_subscription(Image,        "/camera/depth/image_raw", self._cb_depth_img, sensor_qos)
+        self.create_subscription(PointCloud2,  "/camera/depth/points",    self._cb_pointcloud, sensor_qos)
+        self.create_subscription(Odometry,     "/rtabmap/odom",           self._cb_icp_odom,   10)
+        self.create_subscription(OccupancyGrid, "/rtabmap/map",           self._cb_rtabmap_map, transient_qos)
+        self.create_subscription(OccupancyGrid, "/map",                   self._cb_relay_map,   transient_qos)
+
         # ── Timers ─────────────────────────────────────────────────────────────
         self.create_timer(10.0, self._odom_health_report)
         self.create_timer(10.0, self._node_and_serial_health_report)
+        self.create_timer(10.0, self._depth_rtabmap_health_report)
+        self.create_timer(10.0, self._tf_chain_health_report)
 
     # ── Velocity callbacks ─────────────────────────────────────────────────────
 
@@ -368,6 +448,193 @@ class DebugMonitor(Node):
         print(
             f"[{DIM}{ts()}{RESET}] {BOLD}Serial ports{RESET}   "
             + "  ".join(serial_parts)
+        )
+
+
+    # ── Depth camera callbacks ─────────────────────────────────────────────────
+
+    def _cb_depth_img(self, msg: Image):
+        self._depth_img_count += 1
+        self._last_depth_time = time.monotonic()
+
+    def _cb_pointcloud(self, msg: PointCloud2):
+        self._pc_count += 1
+        self._last_pc_time = time.monotonic()
+        self._last_pc_n_points = len(bytes(msg.data)) // max(msg.point_step, 1)
+
+    # ── ICP odometry callback ──────────────────────────────────────────────────
+
+    def _cb_icp_odom(self, msg: Odometry):
+        self._icp_odom_count += 1
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+
+        # Largest diagonal of the 6×6 pose covariance matrix
+        cov = msg.pose.covariance
+        diag = [cov[i * 7] for i in range(6)]   # indices 0,7,14,21,28,35
+        max_cov = max(abs(v) for v in diag)
+        self._last_icp_cov_max = max_cov
+
+        was_lost = self._icp_lost_tracking
+        self._icp_lost_tracking = max_cov > ICP_COV_WARN
+
+        # Alert on tracking loss / recovery
+        if self._icp_lost_tracking and not was_lost:
+            print(
+                f"[{DIM}{ts()}{RESET}] {RED}{BOLD}ICP LOST TRACKING{RESET}  "
+                f"max_cov={max_cov:.3f} > {ICP_COV_WARN}  "
+                f"{YELLOW}— rover pose is unreliable, map may drift{RESET}"
+            )
+        elif not self._icp_lost_tracking and was_lost:
+            print(
+                f"[{DIM}{ts()}{RESET}] {GREEN}{BOLD}ICP tracking recovered{RESET}  "
+                f"max_cov={max_cov:.3f}"
+            )
+
+        # ── Reset detection — mirrors mission_control.cpp near_reset logic ──
+        # mission_control rejects ICP messages that jump near origin (0,0)
+        # while the fused pose says we're >0.5 m away.  This is a silent
+        # rejection — the only sign is rtabmap reporting a fresh origin.
+        # We can't see the fused pose here, so we detect the jump directly:
+        # if ICP suddenly moves >0.5 m toward origin, flag it.
+        near_origin = (abs(x) < 0.05 and abs(y) < 0.05)
+        if near_origin and self._last_icp_pos is not None:
+            prev_x, prev_y = self._last_icp_pos
+            dist_jumped = math.hypot(x - prev_x, y - prev_y)
+            if dist_jumped > 0.5:
+                self._icp_reset_count += 1
+                print(
+                    f"[{DIM}{ts()}{RESET}] {RED}{BOLD}ICP RESET DETECTED (#{self._icp_reset_count}){RESET}  "
+                    f"jumped {dist_jumped:.2f} m back to origin ({x:.3f},{y:.3f})  "
+                    f"{YELLOW}mission_control will REJECT this — fused odom unaffected "
+                    f"but /map may desync{RESET}"
+                )
+
+        self._last_icp_pos = (x, y)
+
+    # ── RTAB-Map map callbacks ─────────────────────────────────────────────────
+
+    def _cb_rtabmap_map(self, msg: OccupancyGrid):
+        self._rtabmap_map_count += 1
+        now = time.monotonic()
+
+        w, h = msg.info.width, msg.info.height
+        if w != self._last_map_w or h != self._last_map_h:
+            known_cells = sum(1 for c in msg.data if c >= 0)
+            print(
+                f"[{DIM}{ts()}{RESET}] {CYAN}{BOLD}/rtabmap/map updated{RESET}  "
+                f"{w}×{h} cells  res={msg.info.resolution:.3f}m  "
+                f"known={known_cells}/{w*h}  "
+                f"frame={msg.header.frame_id}"
+            )
+            self._last_map_w = w
+            self._last_map_h = h
+
+        self._last_map_time = now
+
+    def _cb_relay_map(self, msg: OccupancyGrid):
+        self._relay_map_count += 1
+        # If the map has any non-free (-1 or >0) cells it's a real SLAM map
+        has_content = any(c != 0 for c in msg.data)
+        self._map_is_fake = not has_content
+
+    # ── Depth / RTAB-Map health report (every 10 s) ────────────────────────────
+
+    def _depth_rtabmap_health_report(self):
+        now = time.monotonic()
+
+        def rate_status(count, label):
+            if count == 0:
+                return f"{RED}DEAD  (0 msgs/10s){RESET}"
+            elif count < 3:
+                return f"{YELLOW}SLOW  ({count} msgs/10s){RESET}"
+            else:
+                return f"{GREEN}OK    ({count} msgs/10s){RESET}"
+
+        # Depth image
+        depth_age = now - self._last_depth_time if self._last_depth_time else None
+        depth_str = rate_status(self._depth_img_count, "depth_img")
+        if depth_age and depth_age > 2.0:
+            depth_str += f"  {RED}STALE {depth_age:.1f}s{RESET}"
+
+        # PointCloud
+        pc_str = rate_status(self._pc_count, "points")
+        if self._pc_count > 0:
+            pc_str += f"  {DIM}last={self._last_pc_n_points} pts{RESET}"
+
+        # ICP odometry
+        icp_str = rate_status(self._icp_odom_count, "icp_odom")
+        if self._icp_odom_count > 0:
+            cov_colour = RED if self._icp_lost_tracking else GREEN
+            icp_str += f"  {cov_colour}cov={self._last_icp_cov_max:.3f}{RESET}"
+            if self._icp_lost_tracking:
+                icp_str += f"  {RED}{BOLD}⚠ LOST TRACKING{RESET}"
+            if self._icp_reset_count > 0:
+                icp_str += f"  {RED}resets={self._icp_reset_count}{RESET}"
+
+        # RTAB-Map map
+        if self._rtabmap_map_count == 0:
+            map_str = f"{RED}DEAD  (no /rtabmap/map yet){RESET}"
+        else:
+            map_age = now - self._last_map_time
+            if map_age > MAP_STALE_WARN_S:
+                map_str = (
+                    f"{YELLOW}STALE ({map_age:.0f}s since last update)  "
+                    f"{self._last_map_w}×{self._last_map_h}{RESET}"
+                )
+            else:
+                map_str = (
+                    f"{GREEN}OK    ({self._rtabmap_map_count} updates)  "
+                    f"{self._last_map_w}×{self._last_map_h}{RESET}"
+                )
+
+        # /map relay
+        map_src = f"{YELLOW}fake_map{RESET}" if self._map_is_fake else f"{GREEN}rtabmap SLAM{RESET}"
+        relay_str = (
+            f"{GREEN}relaying{RESET}" if self._relay_map_count > 0
+            else f"{RED}no /map received{RESET}"
+        )
+
+        print(
+            f"[{DIM}{ts()}{RESET}] {BOLD}Camera health (last 10s){RESET}  "
+            f"depth_img={depth_str}  points={pc_str}"
+        )
+        print(
+            f"[{DIM}{ts()}{RESET}] {BOLD}RTAB-Map health (last 10s){RESET}  "
+            f"icp_odom={icp_str}  map={map_str}"
+        )
+        print(
+            f"[{DIM}{ts()}{RESET}] {BOLD}/map status{RESET}  "
+            f"source={map_src}  relay={relay_str}"
+        )
+
+        # Reset counters
+        self._depth_img_count  = 0
+        self._pc_count         = 0
+        self._icp_odom_count   = 0
+        self._rtabmap_map_count = 0
+        self._relay_map_count  = 0
+
+    # ── TF chain health report (every 10 s) ────────────────────────────────────
+
+    def _tf_chain_health_report(self):
+        parts = []
+        for parent, child in REQUIRED_TF_CHAIN:
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    parent, child, rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1))
+                t = tf.transform.translation
+                parts.append(
+                    f"{GREEN}✓{parent}→{child}{RESET}"
+                    f"{DIM}({t.x:+.2f},{t.y:+.2f},{t.z:+.2f}){RESET}"
+                )
+            except Exception:
+                parts.append(f"{RED}✗{parent}→{child} MISSING{RESET}")
+
+        print(
+            f"[{DIM}{ts()}{RESET}] {BOLD}TF chain{RESET}    "
+            + "  ".join(parts)
         )
 
 

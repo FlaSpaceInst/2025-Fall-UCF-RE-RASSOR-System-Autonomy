@@ -81,6 +81,14 @@ if(BUILD_TESTING)
       RMW_IMPLEMENTATION=rmw_fastrtps_cpp
   )
 
+  # ── Pipeline bench (depth camera / ICP odom / RTAB-Map / /map relay) ────
+  ament_add_pytest_test(test_pipeline_bench
+    test/integration/test_pipeline_bench.py
+    TIMEOUT 300
+    ENV
+      RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  )
+
 endif()
 
 ament_package()

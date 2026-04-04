@@ -33,6 +33,10 @@ from tf2_msgs.msg import TFMessage
 DEPTH_MIN_HZ    = 5.0    # depth image must publish at least this fast
 PC_MIN_HZ       = 5.0    # pointcloud must publish at least this fast
 ICP_MIN_HZ      = 3.0    # ICP odometry minimum rate
+
+# Startup grace: if system was just launched, rates will be low.
+# Default collection window is 20 s to give nodes time to warm up.
+DEFAULT_SECS    = 20.0
 ICP_COV_WARN    = 0.5    # covariance diagonal above this = tracking unstable
 ICP_COV_HARD    = 5.0    # above this = hard failure
 PC_MIN_POINTS   = 1000   # fewer points than this = ICP will likely fail
@@ -82,14 +86,15 @@ class _PreflightNode(Node):
     def __init__(self):
         super().__init__("re_rassor_preflight")
 
-        self.depth_count   = 0
-        self.pc_count      = 0
-        self.pc_points_max = 0
-        self.icp_count     = 0
-        self.icp_cov_max   = 0.0
-        self.map_received  = False
-        self.map_is_blank  = True   # all-zero = still the fake_map
-        self.odom_received = False
+        self.depth_count    = 0
+        self.pc_count       = 0
+        self.pc_points_max  = 0
+        self.icp_count      = 0
+        self.icp_cov_max    = 0.0
+        self.map_received   = False
+        self.map_is_blank   = True   # all-zero = still the fake_map
+        self.odom_received  = False
+        self.wheel_odom_received = False
 
         sensor_qos = QoSProfile(
             depth=10,
@@ -102,11 +107,12 @@ class _PreflightNode(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-        self.create_subscription(Image,        "/camera/depth/image_raw", self._cb_depth,  sensor_qos)
-        self.create_subscription(PointCloud2,  "/camera/depth/points",    self._cb_pc,     sensor_qos)
-        self.create_subscription(Odometry,     "/rtabmap/odom",           self._cb_icp,    10)
-        self.create_subscription(Odometry,     "/odom",                   self._cb_odom,   10)
-        self.create_subscription(OccupancyGrid, "/map",                   self._cb_map,    transient_qos)
+        self.create_subscription(Image,        "/camera/depth/image_raw", self._cb_depth,      sensor_qos)
+        self.create_subscription(PointCloud2,  "/camera/depth/points",    self._cb_pc,         sensor_qos)
+        self.create_subscription(Odometry,     "/rtabmap/odom",           self._cb_icp,        10)
+        self.create_subscription(Odometry,     "/odom",                   self._cb_odom,       10)
+        self.create_subscription(Odometry,     "/odometry/wheel",         self._cb_wheel_odom, 10)
+        self.create_subscription(OccupancyGrid, "/map",                   self._cb_map,        transient_qos)
 
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -128,6 +134,9 @@ class _PreflightNode(Node):
     def _cb_odom(self, _):
         self.odom_received = True
 
+    def _cb_wheel_odom(self, _):
+        self.wheel_odom_received = True
+
     def _cb_map(self, msg: OccupancyGrid):
         self.map_received = True
         self.map_is_blank = all(c == 0 for c in msg.data)
@@ -145,8 +154,8 @@ class _PreflightNode(Node):
 
 def main():
     parser = argparse.ArgumentParser(description="RE-RASSOR preflight check")
-    parser.add_argument("--secs", type=float, default=12.0,
-                        help="Seconds to collect data (default 12)")
+    parser.add_argument("--secs", type=float, default=DEFAULT_SECS,
+                        help=f"Seconds to collect data (default {DEFAULT_SECS:.0f})")
     args = parser.parse_args()
 
     rclpy.init()
@@ -191,7 +200,7 @@ def main():
     if depth_hz >= DEPTH_MIN_HZ:
         results.append((_ok(f"Depth image  {depth_hz:.1f} Hz"), False))
     elif node.depth_count > 0:
-        results.append((_warn(f"Depth image  {depth_hz:.1f} Hz < {DEPTH_MIN_HZ} Hz — camera slow or USB bandwidth limited"), False))
+        results.append((_warn(f"Depth image  {depth_hz:.1f} Hz < {DEPTH_MIN_HZ} Hz — camera slow, USB bandwidth limited, or still warming up"), False))
         warns += 1
     else:
         results.append((_fail("Depth image  0 Hz — camera not publishing.  Check USB connection and astra_camera node"), True))
@@ -208,7 +217,7 @@ def main():
         results.append((_warn(f"PointCloud   {pc_hz:.1f} Hz but only {node.pc_points_max} pts — ICP may fail with sparse cloud"), False))
         warns += 1
     else:
-        results.append((_warn(f"PointCloud   {pc_hz:.1f} Hz < {PC_MIN_HZ} Hz"), False))
+        results.append((_warn(f"PointCloud   {pc_hz:.1f} Hz < {PC_MIN_HZ} Hz — still warming up, re-run preflight after 30 s if system just started"), False))
         warns += 1
 
     # ── 4. ICP odometry ───────────────────────────────────────────────────────
@@ -235,17 +244,37 @@ def main():
         results.append((_fail("/odom relay  nothing on /odom — odom_relay node dead or topic_tools missing"), True))
         failures += 1
 
-    # ── 6. TF chain ───────────────────────────────────────────────────────────
+    # ── 6. Wheel odometry (needed before TF check — explains odom→base_link) ──
+    if node.wheel_odom_received:
+        results.append((_ok("/odometry/wheel  receiving (Arduino connected)"), False))
+    else:
+        results.append((_fail("/odometry/wheel  nothing received — Arduino not sending.  "
+                              "Check USB cable and serial_motor_controller node"), True))
+        failures += 1
+
+    # ── 7. TF chain ───────────────────────────────────────────────────────────
+    # odom→base_link is published by mission_control (requires wheel odom).
+    # base_link→camera_link and camera_link→camera_depth_optical_frame are
+    # static TFs published by re_rassor_full.launch.py at startup.
+    TF_SOURCES = {
+        ("odom",        "base_link"):                      "mission_control (needs wheel odom)",
+        ("base_link",   "camera_link"):                    "static_transform_publisher in launch",
+        ("camera_link", "camera_depth_optical_frame"):     "static_transform_publisher in launch",
+    }
     for parent, child in TF_CHAIN:
         tf = node.lookup_tf(parent, child)
         if tf is not None:
             t = tf.transform.translation
             results.append((_ok(f"TF {parent}→{child}  ({t.x:+.2f},{t.y:+.2f},{t.z:+.2f})"), False))
         else:
-            results.append((_fail(f"TF {parent}→{child}  MISSING — static_transform_publisher not running"), True))
+            source = TF_SOURCES.get((parent, child), "unknown")
+            hint = ""
+            if parent == "odom" and not node.wheel_odom_received:
+                hint = " (root cause: wheel odom dead — fix /odometry/wheel first)"
+            results.append((_fail(f"TF {parent}→{child}  MISSING — published by {source}{hint}"), True))
             failures += 1
 
-    # ── 7. /map ───────────────────────────────────────────────────────────────
+    # ── 8. /map ───────────────────────────────────────────────────────────────
     if not node.map_received:
         results.append((_fail("/map         not received — fake_map.py not running and rtabmap has no map yet"), True))
         failures += 1
@@ -255,7 +284,7 @@ def main():
     else:
         results.append((_ok("/map         received with SLAM content (rtabmap active)"), False))
 
-    # ── 8. Required nodes ─────────────────────────────────────────────────────
+    # ── 9. Required nodes ─────────────────────────────────────────────────────
     node_names = [n for n, _ in node.get_node_names_and_namespaces()]
     for label, ros_name in REQUIRED_NODES:
         if ros_name in node_names:

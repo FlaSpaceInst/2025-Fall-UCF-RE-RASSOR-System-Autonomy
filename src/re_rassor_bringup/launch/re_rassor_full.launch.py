@@ -57,7 +57,12 @@ def generate_launch_description():
         output="screen",
     )
 
-    # ── 0b. Static TF: camera_link → camera_depth_optical_frame ────────────
+    # ── 0b. Static TF: camera_link → camera_depth_optical_frame ─────────────
+    # Collapsed the intermediate camera_depth_frame hop — depth_image_proc only
+    # needs camera_link → camera_depth_optical_frame to stamp point clouds
+    # correctly.  Fewer TF hops = less lookup latency on the slow ARM CPU.
+    # Standard optical-frame rotation: z-forward, x-right, y-down.
+    # args order: x y z yaw pitch roll parent child
     static_tf_depth_optical = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -67,9 +72,29 @@ def generate_launch_description():
         output="screen",
     )
 
-    # ── 0d. Fake map — publish a blank free-space OccupancyGrid on /map ────────
-    # Gives Nav2 a valid latched map immediately so costmaps initialise before
-    # RTAB-Map builds a real one.
+    # ── 0c. Static TF: map → odom (identity) ─────────────────────────────────
+    # In mapless/wheel-odom-only mode there is no SLAM node publishing the
+    # map→odom transform.  Nav2 requires the full chain:
+    #   map → odom → base_link
+    # The identity static TF here satisfies that requirement — it tells Nav2
+    # "the map frame and the odom frame are coincident", which is correct for a
+    # robot that starts at the origin and uses wheel odometry as its sole pose
+    # source.  mission_control owns odom→base_link.
+    static_tf_map_odom = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="map_odom_tf",
+        arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
+        output="screen",
+    )
+
+    # ── 0d. Fake map ─────────────────────────────────────────────────────────
+    # Publishes a blank free-space OccupancyGrid on /map so Nav2's global
+    # costmap static_layer initialises immediately.  In mapless mode the global
+    # costmap's static_layer is essentially a no-op — obstacles are handled
+    # entirely by the local costmap's voxel_layer / obstacle_layer fed by
+    # /camera/depth/points.  The fake map prevents Nav2 from stalling at boot
+    # waiting for a /map message that would never arrive.
     _fake_map_script = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
         '..', '..', '..', '..', 'fake_map.py',
@@ -92,13 +117,15 @@ def generate_launch_description():
         }],
     )
 
-    # ── 2. Astra Pro camera — depth only, 320×240 ───────────────────────────
-    # Color disabled: Le Potato USB 2.0 cannot sustain both streams simultaneously.
-    # publish_tf=false: static TFs above replace the driver's dynamic ones.
-    # 320×240 depth: 4× fewer points than 640×480 — critical for ICP performance
-    # on the Le Potato ARM CPU.  ICP convergence rate improves from ~0.2 Hz to
-    # 5+ Hz.  Spatial resolution is still sufficient for obstacle detection at
-    # the rover's operating range (< 4 m).
+    # ── 2. Astra Pro camera — raw depth stream only, 320×240 ─────────────────
+    # Color disabled: Le Potato USB 2.0 cannot sustain both streams.
+    # 320×240 depth: 4× fewer points than 640×480 — critical for point cloud
+    # processing performance on the Le Potato ARM CPU.
+    # enable_point_cloud=false: we generate the cloud ourselves via
+    # depth_image_proc (node 2b) — the driver's built-in generator stalls at
+    # 0 Hz when color is disabled because it still needs color camera_info.
+    # publish_tf=false: static TFs (0a, 0b) replace the driver's 10 Hz TFs,
+    # eliminating TF timeout errors against the 30 Hz depth stream.
     astra_camera = IncludeLaunchDescription(
         AnyLaunchDescriptionSource([
             PathJoinSubstitution([
@@ -108,127 +135,46 @@ def generate_launch_description():
             ])
         ]),
         launch_arguments={
-            "publish_tf":    "false",
-            "enable_color":  "false",
-            "depth_width":   "320",
-            "depth_height":  "240",
+            "publish_tf":         "false",
+            "enable_color":       "false",
+            "enable_point_cloud": "false",
+            "depth_width":        "320",
+            "depth_height":       "240",
         }.items(),
     )
 
-    # ── 3. RTAB-Map — depth-only (ICP odometry + SLAM) ──────────────────────
-    # Direct nodes instead of rtabmap.launch.py wrapper, which always forces
-    # RGB subscription regardless of subscribe_rgb argument.
-    #
-    # icp_odometry: PointCloud2 → /rtabmap/odom  (no RGB needed)
-    # rtabmap:      PointCloud2 + /rtabmap/odom → /rtabmap/map
-    # Relay nodes (3b, 3c) bridge /rtabmap/odom → /odom and /rtabmap/map → /map.
-
-    icp_odom = TimerAction(
-        period=3.0,
-        actions=[Node(
-            package="rtabmap_odom",
-            executable="icp_odometry",
-            name="icp_odometry",
-            namespace="rtabmap",
-            output="screen",
-            remappings=[
-                ("scan_cloud", "/camera/depth/points"),
-            ],
-            parameters=[{
-                "frame_id":                      "base_link",
-                "odom_frame_id":                 "odom",
-                "publish_tf":                    False,
-                "approx_sync":                   True,
-                "queue_size":                    5,
-                "Reg/Force3DoF":                 "true",
-                # ── Performance tuning for Le Potato ARM ──────────────────────
-                # Voxel-filter the input cloud before ICP.  At 0.05 m voxels a
-                # 320×240 cloud (~76k pts) shrinks to ~3-8k pts — ICP runs
-                # 10-20× faster with negligible accuracy loss at rover speeds.
-                "Icp/VoxelSize":                 "0.05",
-                # Prune correspondences beyond 30 cm — faster matching, also
-                # prevents ICP from latching onto distant background noise.
-                "Icp/MaxCorrespondenceDistance": "0.3",
-                # 10 iterations is sufficient for the slow rover (<0.3 m/s).
-                "Icp/Iterations":                "10",
-            }],
-        )],
-    )
-
-    rtabmap_slam = TimerAction(
-        period=3.5,
-        actions=[Node(
-            package="rtabmap_slam",
-            executable="rtabmap",
-            name="rtabmap",
-            namespace="rtabmap",
-            output="screen",
-            remappings=[
-                ("scan_cloud", "/camera/depth/points"),
-                ("odom",       "/rtabmap/odom"),
-            ],
-            parameters=[{
-                "subscribe_scan_cloud":  True,
-                "subscribe_rgb":         False,
-                "frame_id":              "base_link",
-                "publish_tf":            False,
-                "database_path":         "/tmp/rtabmap.db",
-                "delete_db_on_start":    True,
-                "Reg/Force3DoF":         "true",
-                "Grid/3D":               "false",
-                "Grid/CellSize":         "0.05",
-                "Grid/RangeMax":         "4.0",
-                "Grid/MinGroundHeight":  "-0.1",
-                "Grid/MaxGroundHeight":  "0.15",
-            }],
-        )],
-    )
-
-    # ── 3b. Relay: /rtabmap/odom → /odom ─────────────────────────────────────
-    odom_relay = TimerAction(
-        period=4.0,
-        actions=[Node(
-            package="topic_tools",
-            executable="relay",
-            name="odom_relay",
-            output="screen",
-            arguments=["/rtabmap/odom", "/odom"],
-        )],
-    )
-
-    # ── 3c. Relay: /rtabmap/map → /map ───────────────────────────────────────
-    map_relay = TimerAction(
-        period=4.0,
-        actions=[Node(
-            package="topic_tools",
-            executable="relay",
-            name="map_relay",
-            output="screen",
-            arguments=["/rtabmap/map", "/map"],
-        )],
-    )
-
-    # ── 3d. Depth → PointCloud2 (depth_image_proc) ───────────────────────────
-    # Converts /camera/depth/image_raw + /camera/depth/camera_info
-    # into /camera/depth/points (PointCloud2) for Nav2 costmaps and RViz2.
-    # Runs independently of rtabmap so Nav2 gets obstacle data even if SLAM fails.
+    # ── 2b. depth_image_proc: depth image → PointCloud2 ──────────────────────
+    # Converts /camera/depth/image_raw + /camera/depth/camera_info into
+    # /camera/depth/points.  Works without the color stream.
+    # At 320×240 this produces ~76k points before voxel filtering — well within
+    # the Le Potato's budget for Nav2 voxel_layer processing.
+    # No timer needed: depth_image_proc is a passive subscriber and will simply
+    # wait until the Astra driver begins publishing depth frames.
     depth_to_pointcloud = Node(
         package="depth_image_proc",
         executable="point_cloud_xyz_node",
         name="depth_to_pointcloud",
         output="screen",
         remappings=[
-            ("image_rect",    "/camera/depth/image_raw"),
-            ("camera_info",   "/camera/depth/camera_info"),
-            ("points",        "/camera/depth/points"),
+            ("image_rect",  "/camera/depth/image_raw"),
+            ("camera_info", "/camera/depth/camera_info"),
+            ("points",      "/camera/depth/points"),
         ],
+        parameters=[{
+            "queue_size": 5,
+        }],
     )
 
-    # ── 4. Mission control ───────────────────────────────────────────────────
-    # Fuses /odometry/wheel + /odom → /odometry/fused.
-    # Broadcasts odom→base_link TF.
+    # ── 3. Mission control ───────────────────────────────────────────────────
+    # Sole odometry source: wheel encoders only.
+    # visual_weight=0.0 disables any visual odometry fusion — there is no ICP
+    # or SLAM node in this stack, so visual_odom_topic will receive no messages.
+    # publish_tf=True: mission_control is the single owner of the
+    # odom→base_link TF.  No ICP node fights for this broadcast.
+    # Delayed 3 s to ensure the motor controller is publishing /odometry/wheel
+    # before mission_control subscribes.
     mission_control = TimerAction(
-        period=5.0,
+        period=3.0,
         actions=[Node(
             package="re_rassor_mission_control",
             executable="mission_control",
@@ -236,20 +182,40 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "wheel_odom_topic":  "/odometry/wheel",
-                "visual_odom_topic": "/odom",
+                "visual_odom_topic": "/odom",       # unused — no visual odom
                 "fused_odom_topic":  "/odometry/fused",
-                "visual_weight":     0.0,
+                "visual_weight":     0.0,            # wheel odom only
+                "publish_tf":        True,           # owns odom→base_link TF
             }],
         )],
     )
 
-    # ── 5. Nav2 stack ────────────────────────────────────────────────────────
-    # Delayed 10 s — RTAB-Map and relays must be publishing /map and /odom
-    # before Nav2 costmaps and bt_navigator initialize.
+    # ── 4. Nav2 stack ─────────────────────────────────────────────────────────
+    # Delayed 8 s — mission_control must be publishing /odometry/fused and the
+    # odom→base_link TF before Nav2's controller_server and bt_navigator init.
     #
-    # global costmap: static_layer reads /map (from relay) + obstacle_layer
-    #                 reads /camera/depth/points for live obstacles.
-    # local costmap:  voxel_layer reads /camera/depth/points.
+    # nav2_params.yaml should be configured for mapless/reactive operation:
+    #
+    #   global costmap:
+    #     - static_layer:   reads /map (fake free-space grid — obstacles never
+    #                       written here, only the local costmap matters)
+    #     - obstacle_layer: reads /camera/depth/points for global inflation
+    #     rolling_window: false   (global map stays fixed at origin)
+    #
+    #   local costmap:
+    #     - voxel_layer:    reads /camera/depth/points, clears dynamically
+    #     rolling_window: true    (follows the robot)
+    #     width:  3.0             (3 m × 3 m window is plenty for a slow rover)
+    #     height: 3.0
+    #
+    #   controller_server:
+    #     - use DWB or RPP controller; set min_vel_x low for slow rover
+    #
+    #   bt_navigator:
+    #     - odom_topic: /odometry/fused
+    #
+    # With this config Nav2 plans globally on the static free-space grid and
+    # avoids obstacles reactively using the live local costmap point cloud.
     nav2_nodes = [
         Node(
             package="nav2_controller",
@@ -295,11 +261,11 @@ def generate_launch_description():
         ),
     ]
 
-    nav2 = TimerAction(period=10.0, actions=[GroupAction(nav2_nodes)])
+    nav2 = TimerAction(period=8.0, actions=[GroupAction(nav2_nodes)])
 
-    # ── 6. RViz2 (optional) ──────────────────────────────────────────────────
+    # ── 5. RViz2 (optional) ──────────────────────────────────────────────────
     rviz_node = TimerAction(
-        period=11.0,
+        period=9.0,
         actions=[Node(
             package="rviz2",
             executable="rviz2",
@@ -311,17 +277,20 @@ def generate_launch_description():
 
     return LaunchDescription([
         *declare_args,
-        fake_map,                   # /map ← blank free-space grid (latched)
-        static_tf_base_to_camera,   # base_link  → camera_link
+        # ── Static TFs (immediate) ───────────────────────────────────────────
+        static_tf_base_to_camera,   # base_link → camera_link
         static_tf_depth_optical,    # camera_link → camera_depth_optical_frame
-        motor,
-        astra_camera,
-        depth_to_pointcloud,        # /camera/depth/image_raw → /camera/depth/points
-        icp_odom,                   # /camera/depth/points → /rtabmap/odom
-        rtabmap_slam,               # /camera/depth/points + odom → /rtabmap/map
-        odom_relay,                 # /rtabmap/odom → /odom
-        map_relay,                  # /rtabmap/map  → /map
-        mission_control,
-        nav2,
+        static_tf_map_odom,         # map → odom (identity, no SLAM node present)
+        # ── Map placeholder (immediate) ──────────────────────────────────────
+        fake_map,                   # /map ← blank free-space OccupancyGrid
+        # ── Hardware (immediate) ─────────────────────────────────────────────
+        motor,                      # wheel encoders → /odometry/wheel
+        astra_camera,               # raw 320×240 depth stream
+        depth_to_pointcloud,        # depth image → /camera/depth/points
+        # ── Odometry + TF (t+3s) ─────────────────────────────────────────────
+        mission_control,            # wheel odom → /odometry/fused + odom→base_link TF
+        # ── Navigation (t+8s) ────────────────────────────────────────────────
+        nav2,                       # full Nav2 stack, reactive local costmap
+        # ── Visualisation (t+9s, optional) ───────────────────────────────────
         rviz_node,
     ])

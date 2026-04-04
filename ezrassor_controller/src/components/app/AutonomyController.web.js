@@ -44,6 +44,7 @@ export default function AutonomyController({ navigation }) {
     const [selected,  setSelected]  = useState(null); // {col, row, wx, wy}
     const [navGoal,   setNavGoal]   = useState(null); // {x, y} — last confirmed goal
     const [depthSize, setDepthSize] = useState({ w: 640, h: 480 });
+    const [hasDepth,  setHasDepth]  = useState(false);
 
     const socketRef  = useRef(null);
     const canvasRef  = useRef(null);
@@ -114,20 +115,22 @@ export default function AutonomyController({ navigation }) {
         const { data: b64, width: W, height: H } = data;
         if (!b64 || !W || !H) return;
 
+        const binary = atob(b64);
+        if (binary.length !== W * H) return; // wrong size — drop frame
+
         setDepthSize({ w: W, h: H });
+        setHasDepth(true);
         canvas.width  = W;
         canvas.height = H;
 
         const ctx = canvas.getContext('2d');
-        const binary = atob(b64);
         const imgData = ctx.createImageData(W, H);
-        for (let i = 0; i < binary.length; i++) {
+        for (let i = 0; i < W * H; i++) {
             const v = binary.charCodeAt(i);
-            // Simple blue-to-white colour map: close = bright, far = dark blue
-            imgData.data[i * 4]     = v;             // R
-            imgData.data[i * 4 + 1] = v;             // G
-            imgData.data[i * 4 + 2] = Math.min(255, v + 60); // B (tinted blue)
-            imgData.data[i * 4 + 3] = 255;           // A
+            imgData.data[i * 4]     = v;
+            imgData.data[i * 4 + 1] = v;
+            imgData.data[i * 4 + 2] = v;
+            imgData.data[i * 4 + 3] = 255;
         }
         ctx.putImageData(imgData, 0, 0);
     }, []);
@@ -162,10 +165,9 @@ export default function AutonomyController({ navigation }) {
     const handleForceStop = async () => {
         try {
             const url = ip.startsWith('http') ? ip : `http://${ip}`;
-            await fetch(`${url}/`, {
+            await fetch(`${url}/stop`, {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ wheel_action: { linear_x: 0, angular_z: 0 } }),
             });
             setNavGoal(null);
             setSelected(null);
@@ -335,10 +337,10 @@ export default function AutonomyController({ navigation }) {
                                 background:     '#111',
                             }}
                         />
-                        {!connected && (
+                        {(!connected || (connected && !hasDepth)) && (
                             <View style={styles.canvasOverlay}>
                                 <Text style={styles.canvasOverlayText}>
-                                    Waiting for connection…
+                                    {!connected ? 'Waiting for connection…' : 'No depth signal'}
                                 </Text>
                             </View>
                         )}

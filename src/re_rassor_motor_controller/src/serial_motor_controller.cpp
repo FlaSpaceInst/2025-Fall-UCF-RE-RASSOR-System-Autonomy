@@ -1,12 +1,8 @@
 /**
  * serial_motor_controller.cpp — re_rassor_motor_controller
- * ──────────────────────────────────────────────────────────
- * Identical pub/sub interface to motor_controller.cpp, but instead of HTTP
- * it writes single command bytes over POSIX serial to the Arduino RAMPS 1.4
- * boards running the 2023 RE-RASSOR firmware.
  *
  * Wheel protocol (sent to /dev/arduino_wheel):
- *   0x00 STOP  0x01 FWD  0x02 REV  0x03 LEFT  0x04 RIGHT
+ *   0x00 STOP  0x01 FWD  0x02 REV  0x03 LEFT  0x04 RIGHT  0xFF HALT
  *
  * Drum/shoulder protocol (sent to /dev/arduino_drum):
  *   0x00 STOP  0x05 RAISE_FRONT  0x06 LOWER_FRONT
@@ -20,7 +16,6 @@
 #include <cstring>
 #include <algorithm>
 
-// POSIX serial
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -45,23 +40,19 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
     this->declare_parameter("max_angular_velocity", 2.0);
     this->declare_parameter("update_rate",          50.0);
     this->declare_parameter("rover_namespace",      "ezrassor");
-    this->declare_parameter("command_timeout",        1.0);
-    this->declare_parameter("skid_correction",        0.7);
-    // How long (s) wheel_instructions suppress /cmd_vel after a manual command.
-    // Prevents Nav2 from immediately overriding a manual stop or direction.
-    this->declare_parameter("manual_priority_timeout", 2.0);
+    this->declare_parameter("command_timeout",      1.0);
+    this->declare_parameter("skid_correction",      0.7);
 
-    this->get_parameter("wheel_port",              wheel_port_);
-    this->get_parameter("drum_port",               drum_port_);
-    this->get_parameter("baud_rate",               baud_rate_);
-    this->get_parameter("wheel_base",              wheel_base_);
-    this->get_parameter("max_linear_velocity",     max_linear_velocity_);
-    this->get_parameter("max_angular_velocity",    max_angular_velocity_);
-    this->get_parameter("update_rate",             update_rate_);
-    this->get_parameter("rover_namespace",         rover_namespace_);
-    this->get_parameter("command_timeout",         command_timeout_);
-    this->get_parameter("skid_correction",         skid_correction_);
-    this->get_parameter("manual_priority_timeout", manual_priority_timeout_);
+    this->get_parameter("wheel_port",           wheel_port_);
+    this->get_parameter("drum_port",            drum_port_);
+    this->get_parameter("baud_rate",            baud_rate_);
+    this->get_parameter("wheel_base",           wheel_base_);
+    this->get_parameter("max_linear_velocity",  max_linear_velocity_);
+    this->get_parameter("max_angular_velocity", max_angular_velocity_);
+    this->get_parameter("update_rate",          update_rate_);
+    this->get_parameter("rover_namespace",      rover_namespace_);
+    this->get_parameter("command_timeout",      command_timeout_);
+    this->get_parameter("skid_correction",      skid_correction_);
 
     const std::string ns = "/" + rover_namespace_;
 
@@ -130,20 +121,13 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
         "/motor_controller/serial_status", 10);
 
     // ── Odometry timer ────────────────────────────────────────────────────
-    // Use a dedicated callback group so the odom timer runs in its own thread
-    // and cannot be blocked by a slow serial write in cmdVelCallback.
-    // MultiThreadedExecutor (in main) is required for this to take effect.
-    auto odom_cb_group = this->create_callback_group(
-        rclcpp::CallbackGroupType::MutuallyExclusive);
     auto period = std::chrono::duration<double>(1.0 / update_rate_);
     update_timer_ = this->create_wall_timer(
         std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-        std::bind(&SerialMotorController::updateOdometry, this),
-        odom_cb_group);
+        std::bind(&SerialMotorController::updateOdometry, this));
 
     odometry_state_.last_update = this->now();
     last_command_time_          = this->now();
-    last_manual_cmd_time_       = rclcpp::Time(0, 0, this->get_clock()->get_clock_type()); // epoch = never
 
     RCLCPP_INFO(this->get_logger(),
         "SerialMotorController started\n"
@@ -163,13 +147,10 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
 
 int SerialMotorController::openSerial(const std::string& port, int baud)
 {
-    // O_NONBLOCK prevents open() from blocking on carrier-detect (CD) when the
-    // Arduino hasn't fully booted yet.  After configuring termios we clear the
-    // flag so subsequent reads/writes use normal blocking semantics.
     int fd = ::open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) return -1;
 
-    struct termios tty;
+    struct termios tty{};
     if (tcgetattr(fd, &tty) != 0) {
         ::close(fd);
         return -1;
@@ -192,26 +173,19 @@ int SerialMotorController::openSerial(const std::string& port, int baud)
     tty.c_oflag  = 0;
     tty.c_lflag  = 0;
     tty.c_cc[VMIN]  = 0;
-    tty.c_cc[VTIME] = 1;   // 0.1 s read timeout
+    tty.c_cc[VTIME] = 1;
 
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         ::close(fd);
         return -1;
     }
 
-    // Clear O_NONBLOCK now that termios is configured — we want blocking writes.
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-    }
-
-    // Toggle DTR to reset Arduino (mirrors pyserial's open() behaviour).
-    // DTR low → asserts Arduino reset pin; DTR high → releases it.
+    // Toggle DTR to reset Arduino (mirrors pyserial open() behaviour).
     int dtr = TIOCM_DTR;
-    ioctl(fd, TIOCMBIC, &dtr);   // lower DTR — Arduino enters reset
+    ioctl(fd, TIOCMBIC, &dtr);
     usleep(100000);               // 100 ms
-    ioctl(fd, TIOCMBIS, &dtr);   // raise DTR — Arduino boots
-    usleep(2000000);              // 2 s — wait for bootloader to finish
+    ioctl(fd, TIOCMBIS, &dtr);
+    usleep(2000000);              // 2 s — wait for bootloader
 
     return fd;
 }
@@ -245,24 +219,11 @@ void SerialMotorController::sendDrum(uint8_t cmd)
 void SerialMotorController::applyWheelCommands(double lin_x, double ang_z)
 {
     uint8_t cmd;
-    if (std::abs(lin_x) < 0.01 && std::abs(ang_z) < 0.01) {
-        cmd = SerialCmd::STOP;
-    } else if (lin_x < 0.0 && std::abs(lin_x) < 0.08 && std::abs(ang_z) < 0.01) {
-        // Dead-band: block slow Nav2 backup recovery (typically -0.05 m/s) when
-        // there is no meaningful angular component. The Arduino firmware has no
-        // concept of slow reverse — any REV byte starts the slow-ramp sequence.
-        // Angular-only commands (lin in dead-band but ang significant) fall through
-        // to the rotation cases below so they are not silently dropped.
-        cmd = SerialCmd::STOP;
-    } else if (lin_x > 0.0) {
-        cmd = SerialCmd::FWD;
-    } else if (lin_x < 0.0) {
-        cmd = SerialCmd::REV;
-    } else if (ang_z > 0.0) {
-        cmd = SerialCmd::LEFT;
-    } else {
-        cmd = SerialCmd::RIGHT;
-    }
+    if (lin_x == 0.0 && ang_z == 0.0) cmd = SerialCmd::STOP;
+    else if (lin_x > 0.0)             cmd = SerialCmd::FWD;
+    else if (lin_x < 0.0)             cmd = SerialCmd::REV;
+    else if (ang_z > 0.0)             cmd = SerialCmd::LEFT;
+    else                               cmd = SerialCmd::RIGHT;
     sendWheel(cmd);
 }
 
@@ -292,16 +253,6 @@ void SerialMotorController::applyDrumCommand(double lin_x)
 
 void SerialMotorController::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
-    // wheel_instructions (manual) takes priority — ignore Nav2 cmd_vel for
-    // manual_priority_timeout seconds after any manual command is received.
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        const double since_manual = (this->now() - last_manual_cmd_time_).seconds();
-        if (since_manual < manual_priority_timeout_) {
-            return;
-        }
-    }
-
     const double lin = std::clamp(msg->linear.x,  -max_linear_velocity_,  max_linear_velocity_);
     const double ang = std::clamp(msg->angular.z, -max_angular_velocity_, max_angular_velocity_);
 
@@ -310,11 +261,8 @@ void SerialMotorController::cmdVelCallback(const geometry_msgs::msg::Twist::Shar
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        // If the dead-band will suppress this command (slow backup, no angular),
-        // store 0 velocity so the odom model doesn't integrate phantom motion.
-        const bool dead_banded = (lin < 0.0 && std::abs(lin) < 0.08 && std::abs(ang) < 0.01);
-        motor_state_.linear_velocity  = dead_banded ? 0.0 : lin;
-        motor_state_.angular_velocity = dead_banded ? 0.0 : ang;
+        motor_state_.linear_velocity  = lin;
+        motor_state_.angular_velocity = ang;
         last_command_time_ = this->now();
         commands_active_   = true;
     }
@@ -331,9 +279,8 @@ void SerialMotorController::wheelInstructionsCallback(const geometry_msgs::msg::
         std::lock_guard<std::mutex> lock(state_mutex_);
         motor_state_.linear_velocity  = lin;
         motor_state_.angular_velocity = ang;
-        last_command_time_      = this->now();
-        last_manual_cmd_time_   = this->now();  // suppress /cmd_vel for priority timeout
-        commands_active_        = true;
+        last_command_time_ = this->now();
+        commands_active_   = true;
     }
 
     applyWheelCommands(lin, ang);
@@ -350,44 +297,51 @@ void SerialMotorController::shoulderInstructionsCallback(const geometry_msgs::ms
 
 void SerialMotorController::frontArmInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg)
 {
-    { std::lock_guard<std::mutex> lock(state_mutex_);
-      motor_state_.front_arm_action = msg->data;
-      last_command_time_ = this->now(); }
-    // Arm maps to shoulder raise/lower front
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        motor_state_.front_arm_action = msg->data;
+        last_command_time_ = this->now();
+    }
     applyShoulderCommand(msg->data, 0.0);
 }
 
 void SerialMotorController::backArmInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg)
 {
-    { std::lock_guard<std::mutex> lock(state_mutex_);
-      motor_state_.back_arm_action = msg->data;
-      last_command_time_ = this->now(); }
-    // Arm maps to shoulder raise/lower back
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        motor_state_.back_arm_action = msg->data;
+        last_command_time_ = this->now();
+    }
     applyShoulderCommand(0.0, msg->data);
 }
 
 void SerialMotorController::frontDrumInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg)
 {
-    { std::lock_guard<std::mutex> lock(state_mutex_);
-      motor_state_.front_drum_action = msg->data;
-      last_command_time_ = this->now(); }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        motor_state_.front_drum_action = msg->data;
+        last_command_time_ = this->now();
+    }
     applyDrumCommand(msg->data);
 }
 
 void SerialMotorController::backDrumInstructionsCallback(const std_msgs::msg::Float64::SharedPtr msg)
 {
-    { std::lock_guard<std::mutex> lock(state_mutex_);
-      motor_state_.back_drum_action = msg->data;
-      last_command_time_ = this->now(); }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        motor_state_.back_drum_action = msg->data;
+        last_command_time_ = this->now();
+    }
     applyDrumCommand(msg->data);
 }
 
 void SerialMotorController::routineActionsCallback(const std_msgs::msg::Int8::SharedPtr msg)
 {
-    { std::lock_guard<std::mutex> lock(state_mutex_);
-      motor_state_.active_routine = msg->data;
-      last_command_time_ = this->now(); }
-    // STOP routine sends halt; others are handled at higher level
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        motor_state_.active_routine = msg->data;
+        last_command_time_ = this->now();
+    }
     if (msg->data == 0b100000) sendWheel(SerialCmd::HALT);
 }
 
@@ -397,18 +351,29 @@ void SerialMotorController::routineActionsCallback(const std_msgs::msg::Int8::Sh
 
 void SerialMotorController::updateOdometry()
 {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-
     const rclcpp::Time now = this->now();
-    const double time_since_cmd = (now - last_command_time_).seconds();
+    double v, omega;
+    bool timed_out = false;
 
-    // Command-timeout watchdog
-    if (commands_active_ && time_since_cmd > command_timeout_) {
-        RCLCPP_WARN(this->get_logger(),
-            "Command timeout (%.1fs) — sending STOP to Arduino", time_since_cmd);
-        motor_state_.linear_velocity  = 0.0;
-        motor_state_.angular_velocity = 0.0;
-        commands_active_ = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+
+        const double time_since_cmd = (now - last_command_time_).seconds();
+        if (commands_active_ && time_since_cmd > command_timeout_) {
+            RCLCPP_WARN(this->get_logger(),
+                "Command timeout (%.1fs) — sending STOP to Arduino", time_since_cmd);
+            motor_state_.linear_velocity  = 0.0;
+            motor_state_.angular_velocity = 0.0;
+            commands_active_ = false;
+            timed_out = true;
+        }
+
+        v     = motor_state_.linear_velocity;
+        omega = motor_state_.angular_velocity;
+    }
+
+    // Send STOP outside the mutex — blocking serial write must not hold state_mutex_
+    if (timed_out) {
         writeByte(wheel_fd_, SerialCmd::STOP);
     }
 
@@ -416,31 +381,19 @@ void SerialMotorController::updateOdometry()
     odometry_state_.last_update = now;
 
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-        "Odom tick | active=%d | v=%.3f w=%.3f | dt=%.4f | pos=(%.3f, %.3f, %.3f)",
-        (int)commands_active_.load(),
-        motor_state_.linear_velocity,
-        motor_state_.angular_velocity,
-        dt,
-        odometry_state_.x,
-        odometry_state_.y,
-        odometry_state_.theta);
+        "Odom tick | v=%.3f w=%.3f | dt=%.4f | pos=(%.3f, %.3f, %.3f)",
+        v, omega, dt,
+        odometry_state_.x, odometry_state_.y, odometry_state_.theta);
 
-    if (dt <= 0.0) {
-        return;  // clock went backwards — skip
-    }
-    if (dt > 1.0) {
-        // Timer fired late (ARM under RTAB-Map/Nav2 load) — clamp so we still
-        // publish wheel odom rather than skipping entirely and causing wheel=DEAD.
+    if (dt <= 0.0 || dt > 1.0) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-            "Odom late dt=%.4f — clamping to 1.0s", dt);
-        dt = 1.0;
+            "Odom skipped bad dt=%.4f", dt);
+        return;
     }
 
     // Skid-steer ICR model
-    const double v     = motor_state_.linear_velocity;
-    const double omega = motor_state_.angular_velocity;
-    const double L     = wheel_base_;
-    const double b     = skid_correction_;
+    const double L = wheel_base_;
+    const double b = skid_correction_;
 
     const double v_r = v + (omega * L / 2.0);
     const double v_l = v - (omega * L / 2.0);
@@ -550,7 +503,6 @@ double SerialMotorController::normalizeAngle(double angle)
 
 SerialMotorController::~SerialMotorController()
 {
-    // Send stop before closing
     writeByte(wheel_fd_, SerialCmd::STOP);
     if (wheel_fd_ >= 0) ::close(wheel_fd_);
     if (drum_fd_  >= 0) ::close(drum_fd_);

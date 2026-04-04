@@ -94,6 +94,9 @@ CALIBRATE_SERVICE  = '/re_rassor/calibrate'
 ODOM_TOPIC         = '/odometry/fused'
 MAP_TOPIC          = '/map'
 POINTS_TOPIC       = '/camera/depth/points'
+ANNOTATED_IMG_TOPIC = '/re_rassor/vision/annotated_image'
+RAW_CAM_TOPIC       = '/camera/color/image_raw'   # fallback if vision node not running
+DETECTIONS_TOPIC    = '/re_rassor/vision/detections'
 
 # Max points to send per WebSocket frame (downsampled from full cloud)
 MAX_POINTS         = 512
@@ -112,6 +115,11 @@ _sub_lock          = threading.Lock()
 _latest_odom       = None          # last odom payload dict, updated every message
 _nav_proc          = None          # subprocess handle for active ros2 action send_goal
 _nav_lock          = threading.Lock()
+
+# ── Video feed globals ────────────────────────────────────────────────────────
+_latest_video_frame = None         # latest JPEG bytes for /video_feed
+_video_lock         = threading.Lock()
+_latest_detection   = '{"detection":"false"}'  # JSON string from /re_rassor/vision/detections
 
 
 def _get_ip_address():
@@ -291,10 +299,8 @@ def main(passed_args=None):
 
     def _depth_image_cb(msg):
         """
-        Convert a 16UC1 (mm) or 32FC1 (m) depth image to an 8-bit grayscale
-        array (normalised to 5 m max) and broadcast it as base64 at ~10 Hz.
-        Uses numpy for vectorised pixel conversion — the old per-pixel Python
-        loop took ~2 s on ARM and blocked the entire rclpy spin thread.
+        Normalise a 16UC1 (mm) or 32FC1 (m) depth image to 8-bit grayscale
+        (0 = 0 m, 255 = 5 m) and broadcast raw bytes as base64 at ~10 Hz.
         """
         global _depth_img_counter
         _depth_img_counter += 1
@@ -314,13 +320,13 @@ def main(passed_args=None):
             raw = bytes(msg.data)
             if msg.encoding in ('16UC1', 'mono16'):
                 arr = np.frombuffer(raw, dtype=np.uint16).reshape((H, W))
-                pixels = np.clip(arr * 255 // 5000, 0, 255).astype(np.uint8)
+                pixels = np.clip(arr.astype(np.float32) * (255.0 / 5000.0), 0, 255).astype(np.uint8)
             elif msg.encoding == '32FC1':
                 arr = np.frombuffer(raw, dtype=np.float32).reshape((H, W))
                 finite = np.isfinite(arr) & (arr > 0.0)
-                pixels = np.where(finite, np.clip(arr / 5.0 * 255, 0, 255), 0).astype(np.uint8)
+                pixels = np.where(finite, np.clip(arr * (255.0 / 5.0), 0, 255), 0).astype(np.uint8)
             else:
-                return   # unsupported encoding
+                return
             b64 = base64.b64encode(pixels.tobytes()).decode('ascii')
             _socketio.emit('depth_image', {
                 'data':   b64,
@@ -338,11 +344,76 @@ def main(passed_args=None):
     wheel_instr_relay_sub = node.create_subscription(
         geometry_msgs.msg.Twist, WHEEL_TOPIC, _wheel_instr_cb, QUEUE_SIZE)
 
+    # ── Video frame callbacks ─────────────────────────────────────────────────
+
+    def _image_to_jpeg(msg) -> bytes:
+        """Convert a sensor_msgs/Image to JPEG bytes using numpy (no cv_bridge)."""
+        try:
+            import cv2 as _cv2
+            import numpy as _np
+            raw = bytes(msg.data)
+            enc = msg.encoding
+            if enc in ('rgb8',):
+                arr = _np.frombuffer(raw, dtype=_np.uint8).reshape(
+                    (msg.height, msg.width, 3))
+                bgr = _cv2.cvtColor(arr, _cv2.COLOR_RGB2BGR)
+            elif enc in ('bgr8',):
+                bgr = _np.frombuffer(raw, dtype=_np.uint8).reshape(
+                    (msg.height, msg.width, 3))
+            elif enc in ('bgra8',):
+                arr = _np.frombuffer(raw, dtype=_np.uint8).reshape(
+                    (msg.height, msg.width, 4))
+                bgr = _cv2.cvtColor(arr, _cv2.COLOR_BGRA2BGR)
+            elif enc in ('rgba8',):
+                arr = _np.frombuffer(raw, dtype=_np.uint8).reshape(
+                    (msg.height, msg.width, 4))
+                bgr = _cv2.cvtColor(arr, _cv2.COLOR_RGBA2BGR)
+            elif enc in ('mono8', 'gray8'):
+                gray = _np.frombuffer(raw, dtype=_np.uint8).reshape(
+                    (msg.height, msg.width))
+                bgr = _cv2.cvtColor(gray, _cv2.COLOR_GRAY2BGR)
+            else:
+                return None
+            _, buf = _cv2.imencode('.jpg', bgr, [_cv2.IMWRITE_JPEG_QUALITY, 80])
+            return buf.tobytes()
+        except Exception as e:
+            node.get_logger().warning(f'video frame encode error: {e}',
+                                      throttle_duration_sec=5.0)
+            return None
+
+    def _annotated_img_cb(msg):
+        """Store latest annotated (ArUco overlay) frame for /video_feed."""
+        global _latest_video_frame
+        jpeg = _image_to_jpeg(msg)
+        if jpeg is not None:
+            with _video_lock:
+                _latest_video_frame = jpeg
+
+    def _raw_cam_cb(msg):
+        """Fallback: store raw camera frame when vision node is not running."""
+        global _latest_video_frame
+        # Only use raw if no annotated frame has arrived yet
+        with _video_lock:
+            if _latest_video_frame is not None:
+                return
+        jpeg = _image_to_jpeg(msg)
+        if jpeg is not None:
+            with _video_lock:
+                _latest_video_frame = jpeg
+
+    def _detections_cb(msg):
+        """Cache latest ArUco detection JSON."""
+        global _latest_detection
+        _latest_detection = msg.data
+
     # Create ROS subscribers for streaming topics
-    odom_sub      = node.create_subscription(Odometry,      ODOM_TOPIC,                _odom_cb,        10)
-    map_sub       = node.create_subscription(OccupancyGrid, MAP_TOPIC,                 _map_cb,         10)
-    points_sub    = node.create_subscription(PointCloud2,   POINTS_TOPIC,              _points_cb,       1)
-    depth_img_sub = node.create_subscription(DepthImage,    '/camera/depth/image_raw', _depth_image_cb,  1)
+    odom_sub         = node.create_subscription(Odometry,      ODOM_TOPIC,                _odom_cb,           10)
+    map_sub          = node.create_subscription(OccupancyGrid, MAP_TOPIC,                 _map_cb,            10)
+    points_sub       = node.create_subscription(PointCloud2,   POINTS_TOPIC,              _points_cb,          1)
+    depth_img_sub    = node.create_subscription(DepthImage,    '/camera/depth/image_raw', _depth_image_cb,     1)
+    annotated_sub    = node.create_subscription(DepthImage,    ANNOTATED_IMG_TOPIC,       _annotated_img_cb,   1)
+    raw_cam_sub      = node.create_subscription(DepthImage,    RAW_CAM_TOPIC,             _raw_cam_cb,         1)
+    detections_sub   = node.create_subscription(std_msgs.msg.String, DETECTIONS_TOPIC,   _detections_cb,     10)
 
     # ── Flask + SocketIO app ──────────────────────────────────────────────────
     app = Flask(__name__)
@@ -501,14 +572,42 @@ def main(passed_args=None):
             return jsonify({'status': 500, 'error': str(e)}), 500
 
     # ── POST /stop — force-stop: cancel Nav2 goal + halt wheels ─────────────
-    @app.route('/stop', methods=['POST'])
+    @app.route('/stop', methods=['POST', 'OPTIONS'])
     def handle_stop():
+        if request.method == 'OPTIONS':
+            return jsonify({'status': 200})
         _cancel_nav()
         stop = geometry_msgs.msg.Twist()
         wheel_pub.publish(stop)
         cmd_vel_pub.publish(stop)   # override any in-flight Nav2 /cmd_vel
         node.get_logger().info('Force stop — Nav2 cancelled, wheels halted')
         return jsonify({'status': 200})
+
+    # ── GET /video_feed — MJPEG stream from annotated (or raw) camera ────────
+    @app.route('/video_feed')
+    def video_feed():
+        def _generate():
+            while True:
+                with _video_lock:
+                    frame = _latest_video_frame
+                if frame:
+                    yield (
+                        b'--frame\r\n'
+                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+                    )
+                else:
+                    time.sleep(0.05)
+        from flask import Response, stream_with_context
+        return Response(
+            stream_with_context(_generate()),
+            mimetype='multipart/x-mixed-replace; boundary=frame',
+        )
+
+    # ── GET /is_detection — latest ArUco detection JSON ───────────────────────
+    @app.route('/is_detection')
+    def is_detection():
+        from flask import Response as _Resp
+        return _Resp(_latest_detection, mimetype='application/json')
 
     # ── POST /calibrate ───────────────────────────────────────────────────────
     calibrate_client = node.create_client(std_srvs.srv.Trigger, CALIBRATE_SERVICE)

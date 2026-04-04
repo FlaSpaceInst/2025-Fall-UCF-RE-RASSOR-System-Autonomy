@@ -61,15 +61,17 @@ export default class VideoController extends React.Component {
      */
     async componentDidMount() {
 		await this.getIpFromStorage();
-        this.state.ip = this.props.route.params.currentIp; // setting ip address
+        const currentIp = this.props.route.params.currentIp;
         // important line: sets the IP address for current EZRASSOR instance
-        this.EZRASSOR.host = this.state.ip;
+        this.EZRASSOR.host = currentIp;
 
-        // Set IP address to retreive video feed from
-        this.state.videoIp = 'http://' + this.state.ip + VIDEO_EXT_STANDARD;
+        const base = currentIp.startsWith('http') ? currentIp : `http://${currentIp}`;
 
-        // Set IP address to poll for detection report from 
-        this.state.pollingRoute = this.state.ip + DETECTION_POLLING_EXTENSION;
+        this.setState({
+            ip:           currentIp,
+            videoIp:      `${base}${VIDEO_EXT_STANDARD}`,
+            pollingRoute: `${base}${DETECTION_POLLING_EXTENSION}`,
+        });
 
         // this.state.videoIp = this.props.route.params.currentIp + this.videoExtension;
         console.log('Set videoIp to: ' + this.state.videoIp);
@@ -205,7 +207,7 @@ export default class VideoController extends React.Component {
       * Poll Controller Server Detection API to confirm a paver is still in view to pick
       */
     async confirmDetection(x, y, z) {
-        const response = await fetch('http://' + this.state.pollingRoute)
+        const response = await fetch(this.state.pollingRoute)
             .then((response) => response.json())
             .then((json) => console.log(json));
 
@@ -272,7 +274,7 @@ export default class VideoController extends React.Component {
     async pollForDetection() {
         console.log("Polling for detection at: " + this.state.pollingRoute);
 
-        let response = await fetch('http://' + this.state.pollingRoute);
+        let response = await fetch(this.state.pollingRoute);
         let data = await response.json();
 
         console.log(data);

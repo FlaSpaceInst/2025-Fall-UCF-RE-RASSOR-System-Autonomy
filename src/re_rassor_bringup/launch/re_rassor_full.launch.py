@@ -1,8 +1,10 @@
+import os
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, TimerAction, GroupAction, IncludeLaunchDescription
+    DeclareLaunchArgument, TimerAction, GroupAction, IncludeLaunchDescription,
+    ExecuteProcess,
 )
-from launch.launch_description_sources import PythonLaunchDescriptionSource, AnyLaunchDescriptionSource
+from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -55,19 +57,7 @@ def generate_launch_description():
         output="screen",
     )
 
-    # ── 0b. Static TF: camera_link → camera_color_optical_frame ─────────────
-    # Published statically — prevents "extrapolation into the future" TF
-    # errors when RTAB-Map looks up the transform at exact image timestamps.
-    static_tf_color_optical = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="camera_color_optical_tf",
-        arguments=["0", "0", "0", "-1.5708", "0", "-1.5708",
-                   "camera_link", "camera_color_optical_frame"],
-        output="screen",
-    )
-
-    # ── 0c. Static TF: camera_link → camera_depth_optical_frame ─────────────
+    # ── 0b. Static TF: camera_link → camera_depth_optical_frame ────────────
     static_tf_depth_optical = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -75,6 +65,18 @@ def generate_launch_description():
         arguments=["0", "0", "0", "-1.5708", "0", "-1.5708",
                    "camera_link", "camera_depth_optical_frame"],
         output="screen",
+    )
+
+    # ── 0d. Fake map — publish a blank free-space OccupancyGrid on /map ────────
+    # Gives Nav2 a valid latched map immediately so costmaps initialise before
+    # RTAB-Map builds a real one.
+    _fake_map_script = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        '..', '..', '..', '..', 'fake_map.py',
+    )
+    fake_map = ExecuteProcess(
+        cmd=['python3', _fake_map_script],
+        output='screen',
     )
 
     # ── 1. Motor controller (serial) ─────────────────────────────────────────
@@ -90,8 +92,8 @@ def generate_launch_description():
         }],
     )
 
-    # ── 2. Astra Pro RGBD camera ─────────────────────────────────────────────
-    # Uses official astra_pro launch — configures UVC colour + OpenNI2 depth.
+    # ── 2. Astra Pro camera — depth only ────────────────────────────────────
+    # Color disabled: Le Potato USB 2.0 cannot sustain both streams simultaneously.
     # publish_tf=false: static TFs above replace the driver's dynamic ones.
     astra_camera = IncludeLaunchDescription(
         AnyLaunchDescriptionSource([
@@ -101,57 +103,72 @@ def generate_launch_description():
                 "astra_pro.launch.xml",
             ])
         ]),
-        launch_arguments={"publish_tf": "false"}.items(),
+        launch_arguments={
+            "publish_tf":    "false",
+            "enable_color":  "false",
+        }.items(),
     )
 
-    # ── 3. RTAB-Map (SLAM + odometry) ────────────────────────────────────────
-    # rtabmap_launch runs rgbd_odometry + rtabmap inside the /rtabmap namespace.
-    # Internally they communicate correctly via /rtabmap/odom_info.
-    # Externally their topics are /rtabmap/odom and /rtabmap/map.
-    # Relay nodes below (3b, 3c) bridge these to /odom and /map for Nav2.
-    rtabmap = TimerAction(
+    # ── 3. RTAB-Map — depth-only (ICP odometry + SLAM) ──────────────────────
+    # Direct nodes instead of rtabmap.launch.py wrapper, which always forces
+    # RGB subscription regardless of subscribe_rgb argument.
+    #
+    # icp_odometry: PointCloud2 → /rtabmap/odom  (no RGB needed)
+    # rtabmap:      PointCloud2 + /rtabmap/odom → /rtabmap/map
+    # Relay nodes (3b, 3c) bridge /rtabmap/odom → /odom and /rtabmap/map → /map.
+
+    icp_odom = TimerAction(
         period=3.0,
-        actions=[IncludeLaunchDescription(
-            PythonLaunchDescriptionSource([
-                PathJoinSubstitution([
-                    FindPackageShare("rtabmap_launch"),
-                    "launch",
-                    "rtabmap.launch.py",
-                ])
-            ]),
-            launch_arguments={
-                "rgb_topic":            "/camera/color/image_raw",
-                "depth_topic":          "/camera/depth/image_raw",
-                "camera_info_topic":    "/camera/color/camera_info",
-                "approx_sync":          "true",
-                "frame_id":             "base_link",
-                "odom_frame_id":        "odom",
-                "rviz":                 "false",
-                "rtabmap_viz":          "false",
-                # RTAB-Map internal params must go inside the args string.
-                # Passing them as launch arguments crashes Humble (unknown args).
-                "args": (
-                    "--delete_db_on_start"
-                    " --Reg/Force3DoF true"
-                    " --Grid/FromDepth true"
-                    " --Grid/3D false"
-                    " --Grid/CellSize 0.05"
-                    " --Grid/RangeMax 4.0"
-                    " --Grid/MinGroundHeight -0.1"
-                    " --Grid/MaxGroundHeight 0.15"
-                ),
-                "use_sim_time":    "false",
-                # mission_control owns odom→base_link (fused wheel+visual) and
-                # map→odom (calibration origin).  RTAB-Map must NOT publish these
-                # or it fights mission_control and corrupts Nav2's heading.
-                "publish_tf_odom": "false",
-                "publish_tf_map":  "false",
-            }.items(),
+        actions=[Node(
+            package="rtabmap_odom",
+            executable="icp_odometry",
+            name="icp_odometry",
+            namespace="rtabmap",
+            output="screen",
+            remappings=[
+                ("scan_cloud", "/camera/depth/points"),
+            ],
+            parameters=[{
+                "frame_id":        "base_link",
+                "odom_frame_id":   "odom",
+                "publish_tf":      False,
+                "approx_sync":     True,
+                "queue_size":      10,
+                "Reg/Force3DoF":   "true",
+            }],
+        )],
+    )
+
+    rtabmap_slam = TimerAction(
+        period=3.5,
+        actions=[Node(
+            package="rtabmap_slam",
+            executable="rtabmap",
+            name="rtabmap",
+            namespace="rtabmap",
+            output="screen",
+            remappings=[
+                ("scan_cloud", "/camera/depth/points"),
+                ("odom",       "/rtabmap/odom"),
+            ],
+            parameters=[{
+                "subscribe_scan_cloud":  True,
+                "subscribe_rgb":         False,
+                "frame_id":              "base_link",
+                "publish_tf":            False,
+                "database_path":         "/tmp/rtabmap.db",
+                "delete_db_on_start":    True,
+                "Reg/Force3DoF":         "true",
+                "Grid/3D":               "false",
+                "Grid/CellSize":         "0.05",
+                "Grid/RangeMax":         "4.0",
+                "Grid/MinGroundHeight":  "-0.1",
+                "Grid/MaxGroundHeight":  "0.15",
+            }],
         )],
     )
 
     # ── 3b. Relay: /rtabmap/odom → /odom ─────────────────────────────────────
-    # Humble topic_tools relay takes positional CLI arguments.
     odom_relay = TimerAction(
         period=4.0,
         actions=[Node(
@@ -164,8 +181,6 @@ def generate_launch_description():
     )
 
     # ── 3c. Relay: /rtabmap/map → /map ───────────────────────────────────────
-    # Published with default QoS — Nav2 static_layer uses transient_local
-    # so set map_subscribe_transient_local: false in nav2_params.yaml.
     map_relay = TimerAction(
         period=4.0,
         actions=[Node(
@@ -175,6 +190,22 @@ def generate_launch_description():
             output="screen",
             arguments=["/rtabmap/map", "/map"],
         )],
+    )
+
+    # ── 3d. Depth → PointCloud2 (depth_image_proc) ───────────────────────────
+    # Converts /camera/depth/image_raw + /camera/depth/camera_info
+    # into /camera/depth/points (PointCloud2) for Nav2 costmaps and RViz2.
+    # Runs independently of rtabmap so Nav2 gets obstacle data even if SLAM fails.
+    depth_to_pointcloud = Node(
+        package="depth_image_proc",
+        executable="point_cloud_xyz_node",
+        name="depth_to_pointcloud",
+        output="screen",
+        remappings=[
+            ("image_rect",    "/camera/depth/image_raw"),
+            ("camera_info",   "/camera/depth/camera_info"),
+            ("points",        "/camera/depth/points"),
+        ],
     )
 
     # ── 4. Mission control ───────────────────────────────────────────────────
@@ -191,7 +222,7 @@ def generate_launch_description():
                 "wheel_odom_topic":  "/odometry/wheel",
                 "visual_odom_topic": "/odom",
                 "fused_odom_topic":  "/odometry/fused",
-                "visual_weight":     0.0,  # pure wheel; visual used only by fallback timer
+                "visual_weight":     0.0,
             }],
         )],
     )
@@ -264,12 +295,14 @@ def generate_launch_description():
 
     return LaunchDescription([
         *declare_args,
+        fake_map,                   # /map ← blank free-space grid (latched)
         static_tf_base_to_camera,   # base_link  → camera_link
-        static_tf_color_optical,    # camera_link → camera_color_optical_frame
         static_tf_depth_optical,    # camera_link → camera_depth_optical_frame
         motor,
         astra_camera,
-        rtabmap,
+        depth_to_pointcloud,        # /camera/depth/image_raw → /camera/depth/points
+        icp_odom,                   # /camera/depth/points → /rtabmap/odom
+        rtabmap_slam,               # /camera/depth/points + odom → /rtabmap/map
         odom_relay,                 # /rtabmap/odom → /odom
         map_relay,                  # /rtabmap/map  → /map
         mission_control,

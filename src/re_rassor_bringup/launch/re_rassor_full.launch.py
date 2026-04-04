@@ -1,8 +1,6 @@
-import os
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument, TimerAction, GroupAction, IncludeLaunchDescription,
-    ExecuteProcess,
 )
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -86,22 +84,6 @@ def generate_launch_description():
         name="map_odom_tf",
         arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
         output="screen",
-    )
-
-    # ── 0d. Fake map ─────────────────────────────────────────────────────────
-    # Publishes a blank free-space OccupancyGrid on /map so Nav2's global
-    # costmap static_layer initialises immediately.  In mapless mode the global
-    # costmap's static_layer is essentially a no-op — obstacles are handled
-    # entirely by the local costmap's voxel_layer / obstacle_layer fed by
-    # /camera/depth/points.  The fake map prevents Nav2 from stalling at boot
-    # waiting for a /map message that would never arrive.
-    _fake_map_script = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
-        '..', '..', '..', '..', 'fake_map.py',
-    )
-    fake_map = ExecuteProcess(
-        cmd=['python3', _fake_map_script],
-        output='screen',
     )
 
     # ── 1. Motor controller (serial) ─────────────────────────────────────────
@@ -197,10 +179,8 @@ def generate_launch_description():
     # nav2_params.yaml should be configured for mapless/reactive operation:
     #
     #   global costmap:
-    #     - static_layer:   reads /map (fake free-space grid — obstacles never
-    #                       written here, only the local costmap matters)
-    #     - obstacle_layer: reads /camera/depth/points for global inflation
-    #     rolling_window: false   (global map stays fixed at origin)
+    #     - obstacle_layer: reads /camera/depth/points — no static /map needed
+    #     rolling_window: true    (follows the robot, no map server required)
     #
     #   local costmap:
     #     - voxel_layer:    reads /camera/depth/points, clears dynamically
@@ -281,8 +261,6 @@ def generate_launch_description():
         static_tf_base_to_camera,   # base_link → camera_link
         static_tf_depth_optical,    # camera_link → camera_depth_optical_frame
         static_tf_map_odom,         # map → odom (identity, no SLAM node present)
-        # ── Map placeholder (immediate) ──────────────────────────────────────
-        fake_map,                   # /map ← blank free-space OccupancyGrid
         # ── Hardware (immediate) ─────────────────────────────────────────────
         motor,                      # wheel encoders → /odometry/wheel
         astra_camera,               # raw 320×240 depth stream

@@ -122,6 +122,7 @@ private:
     std::string rover_namespace_;
     double      command_timeout_;
     double      skid_correction_;
+    double      velocity_scale_;
 
     // ── Subscribers ─────────────────────────────────────────────────────────
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;

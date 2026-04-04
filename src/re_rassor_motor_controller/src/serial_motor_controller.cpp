@@ -41,7 +41,12 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
     this->declare_parameter("update_rate",          50.0);
     this->declare_parameter("rover_namespace",      "ezrassor");
     this->declare_parameter("command_timeout",      1.0);
-    this->declare_parameter("skid_correction",      0.7);
+    // skid_correction (b): ICR slip factor for this skid-steer chassis.
+    // velocity_scale: ratio of actual physical wheel speed to cmd_vel magnitude.
+    // Calibrated empirically — rover went 0.5 m when told 2 m (4x linear over-report)
+    // and 90° when told 180° (2x angular over-report).  b=1.4, scale=0.25 corrects both.
+    this->declare_parameter("skid_correction",      1.4);
+    this->declare_parameter("velocity_scale",       0.25);
 
     this->get_parameter("wheel_port",           wheel_port_);
     this->get_parameter("drum_port",            drum_port_);
@@ -53,6 +58,7 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
     this->get_parameter("rover_namespace",      rover_namespace_);
     this->get_parameter("command_timeout",      command_timeout_);
     this->get_parameter("skid_correction",      skid_correction_);
+    this->get_parameter("velocity_scale",       velocity_scale_);
 
     const std::string ns = "/" + rover_namespace_;
 
@@ -135,10 +141,11 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
         "  Drum port:       %s\n"
         "  Odometry rate:   %.0f Hz  (published to /odometry/wheel)\n"
         "  Wheel base:      %.3f m\n"
-        "  Skid correction: %.2f\n"
+        "  Skid correction: %.2f  (ICR slip factor)\n"
+        "  Velocity scale:  %.3f  (cmd_vel -> actual wheel speed ratio)\n"
         "  NOTE: odom->base_link TF is owned by mission_control",
         wheel_port_.c_str(), drum_port_.c_str(),
-        update_rate_, wheel_base_, skid_correction_);
+        update_rate_, wheel_base_, skid_correction_, velocity_scale_);
 }
 
 // ============================================================================
@@ -391,12 +398,18 @@ void SerialMotorController::updateOdometry()
         return;
     }
 
-    // Skid-steer ICR model
-    const double L = wheel_base_;
-    const double b = skid_correction_;
+    // Skid-steer ICR model.
+    // velocity_scale_ converts the cmd_vel magnitude to actual physical wheel
+    // speed: the Arduino uses discrete speed modes so the commanded value is not
+    // the real speed.  Apply the scale to both v and omega so the correction is
+    // consistent for pure-forward, pure-turn, and mixed motion.
+    const double L  = wheel_base_;
+    const double b  = skid_correction_;
+    const double vs = v     * velocity_scale_;
+    const double ws = omega * velocity_scale_;
 
-    const double v_r = v + (omega * L / 2.0);
-    const double v_l = v - (omega * L / 2.0);
+    const double v_r = vs + (ws * L / 2.0);
+    const double v_l = vs - (ws * L / 2.0);
 
     const double v_eff     = (v_r + v_l) / 2.0;
     const double omega_eff = b * (v_r - v_l) / L;

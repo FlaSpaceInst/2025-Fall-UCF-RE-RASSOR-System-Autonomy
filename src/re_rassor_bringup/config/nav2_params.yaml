@@ -92,12 +92,10 @@ global_costmap:
       robot_base_frame: base_link
       update_frequency: 1.0
       publish_frequency: 1.0
-      rolling_window: false
-      width: 20
-      height: 20
+      rolling_window: true
+      width: 10
+      height: 10
       resolution: 0.05
-      origin_x: -10.0
-      origin_y: -10.0
       robot_radius: 0.35
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]

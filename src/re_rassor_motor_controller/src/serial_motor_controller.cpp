@@ -35,13 +35,24 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
     this->declare_parameter("wheel_port",           "/dev/arduino_wheel");
     this->declare_parameter("drum_port",            "/dev/arduino_drum");
     this->declare_parameter("baud_rate",            115200);
-    this->declare_parameter("wheel_base",           0.5);
+    // wheel_base = lateral distance between left/right wheel contact points.
+    // Rover body is ~60 cm long; measured track width ≈ 0.40 m.  Tune to match
+    // observed turning radius.
+    this->declare_parameter("wheel_base",           0.40);
     this->declare_parameter("max_linear_velocity",  1.0);
     this->declare_parameter("max_angular_velocity", 2.0);
     this->declare_parameter("update_rate",          50.0);
     this->declare_parameter("rover_namespace",      "ezrassor");
     this->declare_parameter("command_timeout",      1.0);
     this->declare_parameter("skid_correction",      0.7);
+    // Ratio of actual linear distance to Nav2-commanded distance.
+    // Arduino discrete speed levels → physical distance ≈ 0.25× commanded.
+    // Calibrate: drive a measured 2 m, set to actual_m / 2.0.
+    this->declare_parameter("odom_linear_scale",   0.25);
+    // Ratio of actual angular displacement to Nav2-commanded angle.
+    // Empirically the rover turns 100 deg when 68 deg is commanded → 100/68 ≈ 1.47.
+    // Calibrate: command a 90 deg turn, set to actual_deg / 90.0.
+    this->declare_parameter("odom_angular_scale",  1.47);
 
     this->get_parameter("wheel_port",           wheel_port_);
     this->get_parameter("drum_port",            drum_port_);
@@ -53,6 +64,8 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
     this->get_parameter("rover_namespace",      rover_namespace_);
     this->get_parameter("command_timeout",      command_timeout_);
     this->get_parameter("skid_correction",      skid_correction_);
+    this->get_parameter("odom_linear_scale",   odom_linear_scale_);
+    this->get_parameter("odom_angular_scale",  odom_angular_scale_);
 
     const std::string ns = "/" + rover_namespace_;
 
@@ -131,14 +144,17 @@ SerialMotorController::SerialMotorController(const rclcpp::NodeOptions & options
 
     RCLCPP_INFO(this->get_logger(),
         "SerialMotorController started\n"
-        "  Wheel port:      %s\n"
-        "  Drum port:       %s\n"
-        "  Odometry rate:   %.0f Hz  (published to /odometry/wheel)\n"
-        "  Wheel base:      %.3f m\n"
-        "  Skid correction: %.2f\n"
+        "  Wheel port:         %s\n"
+        "  Drum port:          %s\n"
+        "  Odometry rate:      %.0f Hz  (published to /odometry/wheel)\n"
+        "  Wheel base (track): %.3f m\n"
+        "  Skid correction:    %.2f\n"
+        "  Odom linear scale:  %.3f  (actual/commanded linear distance)\n"
+        "  Odom angular scale: %.3f  (actual/commanded angular displacement)\n"
         "  NOTE: odom->base_link TF is owned by mission_control",
         wheel_port_.c_str(), drum_port_.c_str(),
-        update_rate_, wheel_base_, skid_correction_);
+        update_rate_, wheel_base_, skid_correction_,
+        odom_linear_scale_, odom_angular_scale_);
 }
 
 // ============================================================================
@@ -380,8 +396,13 @@ void SerialMotorController::updateOdometry()
     const double dt = (now - odometry_state_.last_update).seconds();
     odometry_state_.last_update = now;
 
+    // Scale to actual wheel motion — linear and angular have different ratios
+    // because the Arduino's discrete speed levels don't map proportionally.
+    v     *= odom_linear_scale_;   // straight-line: actual ≈ 0.25 × commanded
+    omega *= odom_angular_scale_;  // rotation: actual ≈ 1.47 × commanded (overshoot)
+
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-        "Odom tick | v=%.3f w=%.3f | dt=%.4f | pos=(%.3f, %.3f, %.3f)",
+        "Odom tick | v_actual=%.4f w_actual=%.4f | dt=%.4f | pos=(%.3f, %.3f, %.3f)",
         v, omega, dt,
         odometry_state_.x, odometry_state_.y, odometry_state_.theta);
 

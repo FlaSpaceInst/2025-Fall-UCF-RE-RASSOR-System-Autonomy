@@ -10,6 +10,7 @@ import LoadingScreen from "./src/components/app/LoadingScreen";
 import VideoController from "./src/components/app/VideoController";
 import ControllerScreenPaverArm from "./src/components/app/ControllerScreenPaverArm";
 import AutonomyController from "./src/components/app/AutonomyController";
+import SshTerminal from "./src/components/app/SshTerminal";
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 const Stack = createNativeStackNavigator();
@@ -78,6 +79,11 @@ export default function App() {
                 <Stack.Screen
                     name="Autonomy Screen"
                     component={AutonomyController}
+                    options={{ animation: 'none' }}
+                />
+                <Stack.Screen
+                    name="SSH Terminal Screen"
+                    component={SshTerminal}
                     options={{ animation: 'none' }}
                 />
             </Stack.Navigator>

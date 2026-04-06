@@ -30,9 +30,11 @@ WebSocket events (new):
 """
 
 import math
+import os
 import socket
 import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -93,6 +95,7 @@ CALIBRATE_SERVICE  = '/re_rassor/calibrate'
 
 ODOM_TOPIC         = '/odometry/fused'
 MAP_TOPIC          = '/map'
+COSTMAP_TOPIC      = '/map'
 POINTS_TOPIC       = '/camera/depth/points'
 ANNOTATED_IMG_TOPIC = '/re_rassor/vision/annotated_image'
 RAW_CAM_TOPIC       = '/camera/color/image_raw'   # fallback if vision node not running
@@ -109,6 +112,7 @@ DEPTH_IMG_SKIP     = 3
 _socketio          = None          # set in main()
 _odom_counter      = 0
 _last_map_seq      = -1
+_last_costmap_time = 0.0           # wall-clock time of last costmap broadcast
 _depth_img_counter = 0
 _subscribers       = set()         # active WebSocket subscription types
 _sub_lock          = threading.Lock()
@@ -132,6 +136,34 @@ def _get_ip_address():
         return 'ip_' + ip.replace('.', '_')
     except Exception:
         return 'ezrassor'
+
+
+def _serial_halt(port: str) -> bool:
+    """
+    Write 0xFF (HALT) directly to the wheel Arduino serial port, bypassing ROS.
+    Uses the same baud / termios settings as serial_motor_controller.cpp.
+    Returns True on success, False if the port could not be opened.
+    """
+    try:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            tty = termios.tcgetattr(fd)
+            # 115200 8N1, raw mode
+            tty[0] = 0                         # iflag
+            tty[1] = 0                         # oflag
+            tty[2] = (termios.CS8 | termios.CLOCAL | termios.CREAD)  # cflag
+            tty[3] = 0                         # lflag
+            tty[4] = termios.B115200           # ispeed
+            tty[5] = termios.B115200           # ospeed
+            tty[6][termios.VMIN]  = 0
+            tty[6][termios.VTIME] = 1
+            termios.tcsetattr(fd, termios.TCSANOW, tty)
+            os.write(fd, bytes([0xFF]))        # HALT command
+            return True
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
 
 
 def _yaw_from_quaternion(q):
@@ -276,6 +308,35 @@ def main(passed_args=None):
         except Exception as e:
             node.get_logger().warning(f'map WS emit error: {e}')
 
+    def _costmap_cb(msg):
+        """Broadcast Nav2 global costmap to subscribed clients at most once per second."""
+        global _last_costmap_time
+        with _sub_lock:
+            if 'costmap' not in _subscribers:
+                return
+        if _socketio is None:
+            return
+        now = time.time()
+        if now - _last_costmap_time < 1.0:
+            return
+        _last_costmap_time = now
+        try:
+            payload = {
+                'width':      msg.info.width,
+                'height':     msg.info.height,
+                'resolution': msg.info.resolution,
+                'origin_x':   round(msg.info.origin.position.x, 4),
+                'origin_y':   round(msg.info.origin.position.y, 4),
+                'data':       list(msg.data),   # int8[] — -1 unknown, 0 free, 1-99 inflated, 100 lethal
+                'stamp':      msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            }
+            _socketio.emit('costmap', payload)
+            node.get_logger().debug(
+                f'Costmap broadcast: {msg.info.width}x{msg.info.height} '
+                f'@ {msg.info.resolution}m/cell')
+        except Exception as e:
+            node.get_logger().warning(f'costmap WS emit error: {e}')
+
     def _points_cb(msg):
         """Broadcast downsampled depth point cloud to subscribed clients."""
         with _sub_lock:
@@ -409,6 +470,7 @@ def main(passed_args=None):
     # Create ROS subscribers for streaming topics
     odom_sub         = node.create_subscription(Odometry,      ODOM_TOPIC,                _odom_cb,           10)
     map_sub          = node.create_subscription(OccupancyGrid, MAP_TOPIC,                 _map_cb,            10)
+    costmap_sub      = node.create_subscription(OccupancyGrid, COSTMAP_TOPIC,             _costmap_cb,         1)
     points_sub       = node.create_subscription(PointCloud2,   POINTS_TOPIC,              _points_cb,          1)
     depth_img_sub    = node.create_subscription(DepthImage,    '/camera/depth/image_raw', _depth_image_cb,     1)
     annotated_sub    = node.create_subscription(DepthImage,    ANNOTATED_IMG_TOPIC,       _annotated_img_cb,   1)
@@ -444,12 +506,24 @@ def main(passed_args=None):
         return jsonify({'status': 200, 'node': NODE_NAME, 'ws_port': 5000})
 
     def _cancel_nav():
-        """Kill the active Nav2 goal subprocess so Nav2 stops publishing /cmd_vel."""
+        """Cancel the active Nav2 goal and clean up the send_goal subprocess."""
         global _nav_proc
+        # Tell the Nav2 action server to abort the goal.  Sending no goal-id
+        # cancels all active goals on /navigate_to_pose.
+        try:
+            subprocess.run(
+                ['ros2', 'action', 'cancel', '/navigate_to_pose'],
+                timeout=2.0,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            node.get_logger().info('Nav2 goal cancelled via ros2 action cancel')
+        except Exception as exc:
+            node.get_logger().warning(f'ros2 action cancel failed: {exc}')
+        # Also reap the send_goal subprocess so it doesn't become a zombie.
         with _nav_lock:
             if _nav_proc is not None and _nav_proc.poll() is None:
                 _nav_proc.terminate()
-                node.get_logger().info('Nav2 goal cancelled (manual override)')
             _nav_proc = None
 
     # ── POST / — main command endpoint ───────────────────────────────────────
@@ -577,11 +651,20 @@ def main(passed_args=None):
         if request.method == 'OPTIONS':
             return jsonify({'status': 200})
         _cancel_nav()
+        # Low-level serial HALT (0xFF) first — bypasses ROS entirely so the
+        # Arduino stops even if Nav2 / cmd_vel pipeline is overloaded or stuck.
+        serial_ok = _serial_halt(wheel_port)
+        if not serial_ok:
+            node.get_logger().warning(
+                f'Serial HALT failed on {wheel_port} — falling back to /cmd_vel only')
+        # Also publish zero Twist so the ROS pipeline stays consistent.
         stop = geometry_msgs.msg.Twist()
         wheel_pub.publish(stop)
-        cmd_vel_pub.publish(stop)   # override any in-flight Nav2 /cmd_vel
-        node.get_logger().info('Force stop — Nav2 cancelled, wheels halted')
-        return jsonify({'status': 200})
+        cmd_vel_pub.publish(stop)
+        node.get_logger().info(
+            f'Force stop — serial HALT {"sent" if serial_ok else "FAILED"}, '
+            'Nav2 cancelled, /cmd_vel zeroed')
+        return jsonify({'status': 200, 'serial_halt': serial_ok})
 
     # ── GET /video_feed — MJPEG stream from annotated (or raw) camera ────────
     @app.route('/video_feed')
@@ -690,6 +773,19 @@ def main(passed_args=None):
         with _sub_lock:
             _subscribers.discard('map')
         emit('unsubscribed', {'topic': 'map'})
+
+    @_socketio.on('subscribe_costmap')
+    def on_subscribe_costmap():
+        with _sub_lock:
+            _subscribers.add('costmap')
+        node.get_logger().info('WS: subscribed to global costmap')
+        emit('subscribed', {'topic': 'costmap'})
+
+    @_socketio.on('unsubscribe_costmap')
+    def on_unsubscribe_costmap():
+        with _sub_lock:
+            _subscribers.discard('costmap')
+        emit('unsubscribed', {'topic': 'costmap'})
 
     @_socketio.on('subscribe_points')
     def on_subscribe_points():

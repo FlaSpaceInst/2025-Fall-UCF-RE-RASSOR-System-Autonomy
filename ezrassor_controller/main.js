@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
 const express = require('express');
 const http = require('http');
+const { spawn } = require('child_process');
 
 const PORT = 34756;
 
@@ -95,6 +96,51 @@ ipcMain.on('scan-potatoes', (event) => {
     }
 });
 
+// ── SSH terminal ─────────────────────────────────────────────────────────────
+let sshProcess  = null;
+let sshTarget   = null;
+
+ipcMain.on('ssh-connect', (event, { target }) => {
+    if (sshProcess) {
+        try { sshProcess.kill('SIGTERM'); } catch (_) {}
+        sshProcess = null;
+    }
+    sshTarget = target;
+
+    const proc = spawn('ssh', [
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'ConnectTimeout=5',
+        target,
+    ]);
+    sshProcess = proc;
+
+    proc.stdout.on('data', (d) => event.sender.send('ssh-data', d.toString()));
+    proc.stderr.on('data', (d) => event.sender.send('ssh-data', d.toString()));
+    proc.on('close', (code) => {
+        event.sender.send('ssh-closed', { code, target: sshTarget });
+        if (sshProcess === proc) sshProcess = null;
+    });
+    proc.on('error', (err) => {
+        event.sender.send('ssh-data', `[spawn error] ${err.message}\n`);
+        event.sender.send('ssh-closed', { code: 1, target: sshTarget });
+        if (sshProcess === proc) sshProcess = null;
+    });
+});
+
+ipcMain.on('ssh-input', (_event, data) => {
+    if (sshProcess) {
+        try { sshProcess.stdin.write(data); } catch (_) {}
+    }
+});
+
+ipcMain.on('ssh-disconnect', () => {
+    if (sshProcess) {
+        try { sshProcess.kill('SIGTERM'); } catch (_) {}
+        sshProcess = null;
+    }
+});
+
 app.on('window-all-closed', () => {
+    if (sshProcess) { try { sshProcess.kill('SIGTERM'); } catch (_) {} }
     if (process.platform !== 'darwin') app.quit();
 });

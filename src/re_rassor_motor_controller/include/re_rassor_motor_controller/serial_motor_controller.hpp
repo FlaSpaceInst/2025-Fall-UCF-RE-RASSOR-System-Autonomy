@@ -122,6 +122,15 @@ private:
     std::string rover_namespace_;
     double      command_timeout_;
     double      skid_correction_;
+    // Scales commanded LINEAR velocity to actual wheel velocity for odometry.
+    // The Arduino firmware uses discrete speed levels; empirically the rover
+    // travels ~1/4 of the Nav2-commanded distance.  Tune: actual_m / commanded_m.
+    double      odom_linear_scale_;
+    // Scales commanded ANGULAR velocity for odometry.  The Arduino's discrete
+    // speed levels produce more angular rate than the ICR model predicts from
+    // the commanded omega.  Empirically: 100 deg actual / 68 deg commanded ≈ 1.47.
+    // Tune: actual_deg / commanded_deg.
+    double      odom_angular_scale_;
 
     // ── Subscribers ─────────────────────────────────────────────────────────
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;

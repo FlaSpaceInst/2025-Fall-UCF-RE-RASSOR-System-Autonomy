@@ -3,9 +3,10 @@
  * ──────────────────
  * SSH terminal screen for RE-RASSOR (Electron only).
  *
- * Connection sequence:
- *   1. Attempt  ubuntu@shadow.local  (ConnectTimeout = 5 s)
- *   2. On non-zero exit before a live session, fall back to  ubuntu@shadow
+ * Connection sequence (tries each in order until one succeeds):
+ *   1. ubuntu@shadow
+ *   2. ubuntu@shadow.local
+ *   3. ubuntu@<server IP from AsyncStorage, port stripped>
  *
  * Requires the SSH IPC bridge exposed by preload.js:
  *   window.api.sshConnect(target)
@@ -19,40 +20,47 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView, TextInput } from 'react-native';
 import { useFonts } from 'expo-font';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const PRIMARY_TARGET  = 'ubuntu@shadow.local';
-const FALLBACK_TARGET = 'ubuntu@shadow';
-
-// Strip common ANSI / VT100 escape sequences so output is legible in plain text.
+// Strip common ANSI / VT100 escape sequences so output is legible as plain text.
 const ANSI_RE = /\x1B\[[0-9;]*[mGKHFJABCDsu]|\x1B\][^\x07]*\x07|\x1B[@-_][0-?]*[ -/]*[@-~]/g;
 const stripAnsi = (s) => s.replace(ANSI_RE, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+// Strip port from a stored "host:port" string, return just the host.
+const hostOnly = (ipPort) => (ipPort || '').split(':')[0].trim();
 
 // ── Component ──────────────────────────────────────────────────────────────────
 export default function SshTerminal({ navigation }) {
     const [output,        setOutput]        = useState('');
     const [input,         setInput]         = useState('');
     const [status,        setStatus]        = useState('Initialising…');
-    const [connState,     setConnState]     = useState('idle');   // idle|connecting|live|ended|failed
-    const [currentTarget, setCurrentTarget] = useState(PRIMARY_TARGET);
+    const [connState,     setConnState]     = useState('idle'); // idle|connecting|live|ended|failed
+    const [currentTarget, setCurrentTarget] = useState('');
 
-    // phaseRef tracks the connection phase for use inside async IPC callbacks
-    // where React state would be stale.
-    // Values: 'primary' | 'fallback' | 'live' | 'ended' | 'failed'
-    const phaseRef  = useRef('idle');
+    // Queue of targets to try, managed as a ref so IPC callbacks see current state.
+    const queueRef  = useRef([]);   // remaining targets to try
+    const liveRef   = useRef(false); // true once we receive SSH data (session established)
     const scrollRef = useRef(null);
 
     const [fontsLoaded] = useFonts({ NasaFont: require('../../../assets/nasa.ttf') });
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Append text to terminal output ────────────────────────────────────────
     const appendOutput = (text) => {
         setOutput((prev) => prev + stripAnsi(text));
     };
 
-    const connect = (target) => {
-        const isPrimary = target === PRIMARY_TARGET;
-        phaseRef.current = isPrimary ? 'primary' : 'fallback';
-        setConnState('connecting');
+    // ── Attempt connection to the next target in the queue ───────────────────
+    const tryNext = (queue, overrideTarget) => {
+        const target = overrideTarget ?? queue.shift();
+        if (!target) {
+            setStatus('All connection attempts failed');
+            setConnState('failed');
+            return;
+        }
+        queueRef.current = queue;
+        liveRef.current  = false;
         setCurrentTarget(target);
+        setConnState('connecting');
         setStatus(`Connecting to ${target}…`);
         appendOutput(`\n--- Attempting ${target} ---\n`);
 
@@ -62,16 +70,31 @@ export default function SshTerminal({ navigation }) {
             appendOutput('[ERROR] SSH API not available — is this running inside Electron?\n');
             setStatus('SSH API unavailable');
             setConnState('failed');
-            phaseRef.current = 'failed';
         }
     };
 
-    // ── IPC listeners (set up once on mount) ──────────────────────────────────
+    // ── Build target list and start connecting ────────────────────────────────
+    const startSession = async () => {
+        const stored   = await AsyncStorage.getItem('myIp');
+        const serverIp = hostOnly(stored);
+
+        // Build the ordered list; include IP fallback only if it's a real address
+        const targets = [
+            'ubuntu@shadow',
+            'ubuntu@shadow.local',
+            ...(serverIp ? [`ubuntu@${serverIp}`] : []),
+        ];
+
+        const [first, ...rest] = targets;
+        tryNext(rest, first);
+    };
+
+    // ── IPC listeners — set up once on mount ─────────────────────────────────
     useEffect(() => {
         window.api?.onSshData?.((data) => {
             appendOutput(data);
-            if (phaseRef.current === 'primary' || phaseRef.current === 'fallback') {
-                phaseRef.current = 'live';
+            if (!liveRef.current) {
+                liveRef.current = true;
                 setConnState('live');
                 setStatus('Connected');
             }
@@ -80,18 +103,17 @@ export default function SshTerminal({ navigation }) {
         window.api?.onSshClosed?.(({ code, target }) => {
             appendOutput(`\n--- ${target} exited (code ${code ?? '?'}) ---\n`);
 
-            if (phaseRef.current === 'primary' && code !== 0) {
-                // Primary failed before establishing a session → try fallback
-                connect(FALLBACK_TARGET);
+            if (!liveRef.current && code !== 0) {
+                // Failed before session was established — try the next target
+                tryNext(queueRef.current);
             } else {
                 const ok = code === 0;
-                phaseRef.current = ok ? 'ended' : 'failed';
                 setConnState(ok ? 'ended' : 'failed');
                 setStatus(ok ? 'Session ended' : 'Connection failed');
             }
         });
 
-        connect(PRIMARY_TARGET);
+        startSession();
 
         return () => {
             window.api?.removeSshListeners?.();
@@ -99,12 +121,12 @@ export default function SshTerminal({ navigation }) {
         };
     }, []);
 
-    // ── Auto-scroll when output grows ─────────────────────────────────────────
+    // ── Auto-scroll terminal output ───────────────────────────────────────────
     useEffect(() => {
         scrollRef.current?.scrollToEnd({ animated: false });
     }, [output]);
 
-    // ── Send command to SSH stdin ─────────────────────────────────────────────
+    // ── Send input to SSH stdin ───────────────────────────────────────────────
     const handleSend = () => {
         const toSend = input;
         setInput('');
@@ -131,7 +153,7 @@ export default function SshTerminal({ navigation }) {
                 <Text style={styles.headerTitle}>SSH TERMINAL</Text>
                 <View style={styles.headerRight}>
                     <View style={[styles.dot, { backgroundColor: dotColor }]} />
-                    <Text style={styles.headerIp}>{currentTarget}</Text>
+                    <Text style={styles.headerIp}>{currentTarget || '—'}</Text>
                 </View>
             </View>
 
@@ -172,7 +194,7 @@ export default function SshTerminal({ navigation }) {
                         style={styles.reconnectBtn}
                         onPress={() => {
                             setOutput('');
-                            connect(PRIMARY_TARGET);
+                            startSession();
                         }}
                     >
                         <Text style={styles.actionBtnText}>RECONNECT</Text>
@@ -213,7 +235,7 @@ const styles = StyleSheet.create({
                      borderBottomWidth: 1, borderBottomColor: BORDER },
     statusText:    { color: DIM, fontSize: 12 },
 
-    // Terminal output area — dark like a real terminal
+    // Terminal output area
     terminal:      { flex: 1, backgroundColor: '#0d1117' },
     terminalContent: { padding: 12, flexGrow: 1 },
     termText:      { color: '#c9d1d9', fontSize: 13, fontFamily: 'monospace', lineHeight: 20 },

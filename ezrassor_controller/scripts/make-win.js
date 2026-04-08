@@ -1,13 +1,10 @@
 /**
- * make-mac.js
+ * make-win.js
  *
- * Expo's entry-point resolver reads the "main" field from package.json and
- * passes it straight to Metro as the bundle root.  Since "main" must be
- * main.js for electron-forge to launch the Electron process, we temporarily
- * swap it to index.js (the React entry) for the web export, then restore it
- * before electron-forge packages everything into a DMG.
+ * Same main-field swap as make-mac.js, but targets the Squirrel maker for
+ * Windows packaging.  Run this on a Windows host.
  *
- * Usage:  node scripts/make-mac.js
+ * Usage:  node scripts/make-win.js
  */
 
 'use strict';
@@ -16,7 +13,7 @@ const { execSync } = require('child_process');
 const fs            = require('fs');
 const path          = require('path');
 
-const PKG_PATH  = path.join(__dirname, '..', 'package.json');
+const PKG_PATH      = path.join(__dirname, '..', 'package.json');
 const ELECTRON_MAIN = 'main.js';
 const EXPO_ENTRY    = 'node_modules/expo/AppEntry.js';
 
@@ -29,7 +26,7 @@ function setPkgMain(value) {
     const pkg = JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8'));
     pkg.main = value;
     fs.writeFileSync(PKG_PATH, JSON.stringify(pkg, null, 2) + '\n');
-    console.log(`[make-mac] package.json "main" → ${value}`);
+    console.log(`[make-win] package.json "main" → ${value}`);
 }
 
 // Always restore on exit (success, error, or Ctrl-C)
@@ -41,4 +38,4 @@ setPkgMain(EXPO_ENTRY);
 run('npx expo export --platform web --clear');
 
 setPkgMain(ELECTRON_MAIN);
-run('npx electron-forge make');
+run('npx electron-forge make --targets @electron-forge/maker-squirrel');

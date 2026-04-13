@@ -228,6 +228,7 @@ class YoloDetectorNode(rclpy.node.Node):
                 yolo_msg.min_angle   = min_angle
                 yolo_msg.max_angle   = max_angle
                 yolo_msg.name        = label
+                yolo_msg.distance    = distance if distance > 0 else -1.0
                 yolo_array.yolo_objects.append(yolo_msg)
 
                 # Draw bounding box and label on annotated image

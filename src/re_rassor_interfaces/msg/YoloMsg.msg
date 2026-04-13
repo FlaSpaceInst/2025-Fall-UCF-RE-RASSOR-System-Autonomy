@@ -9,3 +9,4 @@ float64 norm_height
 float64 min_angle
 float64 max_angle
 string name
+float64 distance

@@ -2,7 +2,6 @@ const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
 const express = require('express');
 const http = require('http');
-const { spawn } = require('child_process');
 
 const PORT = 34756;
 
@@ -97,50 +96,83 @@ ipcMain.on('scan-potatoes', (event) => {
 });
 
 // ── SSH terminal ─────────────────────────────────────────────────────────────
-let sshProcess  = null;
-let sshTarget   = null;
+// Uses the pure-JS `ssh2` library — no OS-level ssh binary required.
+// Works on Windows, macOS, and Linux without any extra tools.
+let sshConn   = null;
+let sshStream = null;
+
+function sshTeardown() {
+    sshStream = null;
+    if (sshConn) {
+        try { sshConn.end(); } catch (_) {}
+        sshConn = null;
+    }
+}
 
 ipcMain.on('ssh-connect', (event, { target }) => {
-    if (sshProcess) {
-        try { sshProcess.kill('SIGTERM'); } catch (_) {}
-        sshProcess = null;
-    }
-    sshTarget = target;
+    sshTeardown();
 
-    const proc = spawn('ssh', [
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'ConnectTimeout=5',
-        target,
-    ]);
-    sshProcess = proc;
+    // Parse "user@host" from the target string
+    const atIdx    = target.lastIndexOf('@');
+    const username = atIdx >= 0 ? target.slice(0, atIdx)     : 'ubuntu';
+    const host     = atIdx >= 0 ? target.slice(atIdx + 1)    : target;
 
-    proc.stdout.on('data', (d) => event.sender.send('ssh-data', d.toString()));
-    proc.stderr.on('data', (d) => event.sender.send('ssh-data', d.toString()));
-    proc.on('close', (code) => {
-        event.sender.send('ssh-closed', { code, target: sshTarget });
-        if (sshProcess === proc) sshProcess = null;
+    let { Client } = require('ssh2');
+    const conn = new Client();
+    sshConn = conn;
+
+    // Only report ssh-closed once per connection attempt
+    let closed = false;
+    const reportClosed = (code) => {
+        if (closed) return;
+        closed = true;
+        event.sender.send('ssh-closed', { code, target });
+        if (sshConn === conn) sshConn = null;
+        sshStream = null;
+    };
+
+    conn.on('ready', () => {
+        // Request a PTY + interactive shell — this is a protocol-level PTY,
+        // so it works on all platforms with no OS pseudo-terminal needed.
+        conn.shell({ term: 'xterm-256color', rows: 24, cols: 160 }, (err, stream) => {
+            if (err) {
+                event.sender.send('ssh-data', `[shell error] ${err.message}\n`);
+                reportClosed(1);
+                return;
+            }
+            sshStream = stream;
+            stream.on('data',          (d) => event.sender.send('ssh-data', d.toString()));
+            stream.stderr.on('data',   (d) => event.sender.send('ssh-data', d.toString()));
+            stream.on('close',         ()  => { sshStream = null; reportClosed(0); });
+        });
     });
-    proc.on('error', (err) => {
-        event.sender.send('ssh-data', `[spawn error] ${err.message}\n`);
-        event.sender.send('ssh-closed', { code: 1, target: sshTarget });
-        if (sshProcess === proc) sshProcess = null;
+
+    conn.on('error', (err) => {
+        event.sender.send('ssh-data', `[ssh error] ${err.message}\n`);
+        reportClosed(1);
+    });
+
+    conn.on('close', () => reportClosed(1));
+
+    conn.connect({
+        host,
+        port:          22,
+        username,
+        password:      'password',
+        readyTimeout:  8000,          // 8 s — gives .local time to resolve or fail
+        keepaliveInterval: 15000,
     });
 });
 
 ipcMain.on('ssh-input', (_event, data) => {
-    if (sshProcess) {
-        try { sshProcess.stdin.write(data); } catch (_) {}
+    if (sshStream) {
+        try { sshStream.write(data); } catch (_) {}
     }
 });
 
-ipcMain.on('ssh-disconnect', () => {
-    if (sshProcess) {
-        try { sshProcess.kill('SIGTERM'); } catch (_) {}
-        sshProcess = null;
-    }
-});
+ipcMain.on('ssh-disconnect', () => sshTeardown());
 
 app.on('window-all-closed', () => {
-    if (sshProcess) { try { sshProcess.kill('SIGTERM'); } catch (_) {} }
+    sshTeardown();
     if (process.platform !== 'darwin') app.quit();
 });

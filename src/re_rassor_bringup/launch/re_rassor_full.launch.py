@@ -268,7 +268,22 @@ def generate_launch_description():
 
     nav2 = TimerAction(period=12.0, actions=[GroupAction(nav2_nodes)])
 
-    # ── 8. RViz2 (optional) ──────────────────────────────────────────────────
+    # ── 8. YOLO obstacle detector ───────────────────────────────────────────────
+    # NOTE: requires enable_color=true in astra_camera launch above.
+    # On Le Potato (USB 2.0) enabling color may cause bandwidth issues.
+    # Recommended: test USB bandwidth before enabling in production.
+    yolo_detector = Node(
+        package="re_rassor_yolo_detector",
+        executable="yolo_detector",
+        name="yolo_detector",
+        output="screen",
+        parameters=[{
+            "model_path": "yolov8n.pt",
+            "confidence": 0.2,
+        }],
+    )
+
+    # ── 9. RViz2 (optional) ──────────────────────────────────────────────────
     rviz_node = TimerAction(
         period=13.0,
         actions=[Node(

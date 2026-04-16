@@ -81,7 +81,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y -qq \
 
 RUN rosdep update
 
-RUN pip3 install flask flask-cors flask-socketio python-socketio eventlet pyserial
+RUN pip3 install flask flask-cors flask-socketio python-socketio eventlet pyserial ultralytics
 
 
 RUN mkdir src

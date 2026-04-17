@@ -6,7 +6,6 @@ install/
 log/
 out/
 assets/
-docs/
 node_modules/
 
 # Ament / CMake
@@ -95,7 +94,6 @@ src/re_rassor_traffic_controller/src/
 
 *.gv
 assets/
-docs/
 node_modules/
 CLAUDE.md 
 *.pdf

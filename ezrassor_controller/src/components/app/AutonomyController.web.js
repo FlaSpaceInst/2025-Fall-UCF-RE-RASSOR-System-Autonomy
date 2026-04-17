@@ -168,6 +168,7 @@ export default function AutonomyController({ navigation }) {
         if (!canvas || !costmap) return;
 
         const { width: W, height: H, data } = costmap;
+        if (!W || !H) return;
         canvas.width  = W;
         canvas.height = H;
 

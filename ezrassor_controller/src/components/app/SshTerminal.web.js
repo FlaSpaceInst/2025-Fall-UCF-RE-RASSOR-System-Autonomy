@@ -80,8 +80,8 @@ export default function SshTerminal({ navigation }) {
 
         // Build the ordered list; include IP fallback only if it's a real address
         const targets = [
-            'ubuntu@shadow',
             'ubuntu@shadow.local',
+            'ubuntu@shadow',
             ...(serverIp ? [`ubuntu@${serverIp}`] : []),
         ];
 

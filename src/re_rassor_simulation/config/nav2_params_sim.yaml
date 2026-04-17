@@ -1,0 +1,258 @@
+# nav2_params_sim.yaml
+#
+# Skid-steer / DiffDrive simulation config.
+# TF chain: map→odom (slam_toolbox) → odom→base_footprint (sim node) → base_footprint→base_link (static)
+# Odometry: /odometry/wheel (math-integrated from cmd_vel)
+# Scan: /scan_filtered (depthimage_to_laserscan → scan_filter_cb)
+# Goal halt: stateful goal checker + no recovery behaviors → rover stops at goal, does not back away.
+
+# ─── Controller server ──────────────────────────────────────────────────────
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    # 1.0s tolerance: gives controller time to recover from momentary stalls
+    # before aborting. 0.3s was too short — single stall caused immediate abort.
+    failure_tolerance: 1.0
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["general_goal_checker"]
+    # Required so controller_server doesn't warn every navigation attempt.
+    current_goal_checker: general_goal_checker
+    current_progress_checker: progress_checker
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      # 0.3m radius: robot radius is 0.35m; 0.5m was larger than robot radius,
+      # causing failure when turning in place before translating toward goal.
+      required_movement_radius: 0.3
+      movement_time_allowance: 20.0
+
+    # stateful=true: once goal is reached it stays reached.
+    # yaw_goal_tolerance 3.14 = ignore final heading for skid steer.
+    # xy_goal_tolerance 0.5m: looser than default (0.25m) to tolerate slam_toolbox
+    # localization error (~0.2–0.4m typical) so goal checker fires when rover
+    # physically arrives even if map-frame pose has minor drift.
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.5
+      yaw_goal_tolerance: 3.14
+
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # Low velocity for skid steer — prevents overshoot and oscillation.
+      desired_linear_vel: 0.12
+      lookahead_dist: 0.8
+      min_lookahead_dist: 0.6
+      max_lookahead_dist: 1.5
+      # At 0.12m/s: 0.12 × 6.0 = 0.72m — lands within [0.6, 1.5] so velocity-
+      # scaled lookahead is active. Previously 1.5s gave 0.18m < min (0.25m),
+      # so robot was always stuck at min lookahead and oscillated ±theta.
+      lookahead_time: 6.0
+      rotate_to_heading_angular_vel: 0.4
+      transform_tolerance: 0.5
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.02
+      approach_velocity_scaling_dist: 0.8
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_fixed_curvature_lookahead: false
+      curvature_estimator_window_size: 10
+      use_cost_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.05
+      # No rotate-to-heading: skid steer can't cleanly spin in place at goal.
+      use_rotate_to_heading: false
+      allow_reversing: false
+      rotate_to_heading_min_angle: 0.785
+      # Low angular accel for skid steer stability.
+      max_angular_accel: 0.3
+      max_robot_pose_search_dist: 2.0
+
+# ─── Planner server ─────────────────────────────────────────────────────────
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+    expected_planner_frequency: 5.0
+
+    planner_plugins: ["GridBased"]
+    smoother_plugins: ["simple_smoother"]
+
+    GridBased:
+      plugin: "nav2_smac_planner::SmacPlanner2D"
+      tolerance: 0.1
+      use_astar: true
+      allow_unknown: true
+
+      downsample_costmap: false
+      downsampling_factor: 1
+
+      smooth_path: true
+      motion_model_for_search: "DUBIN"
+      angle_quantization_bins: 72
+
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1e-10
+      max_its: 1000
+      do_refinement: true
+
+# ─── Behavior server ─────────────────────────────────────────────────────────
+# Minimal behaviors only. spin/backup removed — they caused the rover to
+# move away from the goal after reaching it via recovery behavior triggering.
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["wait"]
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    global_frame: odom
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.5
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.5
+    min_rotational_vel: 0.1
+    rotational_acc_lim: 0.5
+
+# ─── BT navigator ───────────────────────────────────────────────────────────
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odometry/wheel
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    action_server_result_timeout: 900.0
+    # No spin/backup — use recovery-free BT so rover halts at goal and stays.
+    default_nav_to_pose_bt_xml: "/opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/navigate_w_replanning_only_if_path_becomes_invalid.xml"
+    navigators: ["navigate_to_pose"]
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+
+# ─── Velocity smoother ──────────────────────────────────────────────────────
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    # Low max vel for skid steer.
+    max_velocity: [0.15, 0.0, 0.5]
+    min_velocity: [-0.15, 0.0, -0.5]
+    max_accel: [0.3, 0.0, 0.5]
+    max_decel: [-0.5, 0.0, -0.5]
+    odom_topic: /odometry/wheel
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 0.1
+
+# ─── Local costmap ───────────────────────────────────────────────────────────
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      robot_radius: 0.35
+      plugins: ["obstacle_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 7.5
+          obstacle_min_range: 0.0
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.70
+
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      robot_radius: 0.35
+      resolution: 0.05
+      track_unknown_space: true
+      # rolling_window true: no static map anymore (slam_toolbox publishes
+      # in map_slam frame, not map frame), so fixed costmap has no size source.
+      # 60x60m window around the robot is ample for sim waypoint navigation.
+      rolling_window: true
+      width: 60
+      height: 60
+
+      # static_layer removed: slam_toolbox now publishes /map in frame
+      # 'map_slam' (not 'map'), so the static layer cannot place it in
+      # the global_frame (map).  obstacle_layer provides real-time
+      # obstacles from laser scan which is sufficient for sim navigation.
+      plugins: ["obstacle_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 7.5
+          obstacle_min_range: 0.0
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.70
+
+      always_send_full_costmap: true
+
+# ─── Lifecycle manager ───────────────────────────────────────────────────────
+# map_server excluded — slam_toolbox owns /map.
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: true
+    autostart: true
+    bond_timeout: 4.0
+    node_names:
+      - controller_server
+      - planner_server
+      - behavior_server
+      - bt_navigator
+      - velocity_smoother

@@ -40,7 +40,7 @@ function createWindow() {
 
     win.loadURL(`http://127.0.0.1:${PORT}`);
     // Comment out the line below to hide DevTools in production builds.
-    // win.webContents.openDevTools();
+    win.webContents.openDevTools();
 
     const menu = Menu.buildFromTemplate([
         { label: 'File', submenu: [{ role: 'quit' }] },

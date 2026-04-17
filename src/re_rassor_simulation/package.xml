@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>re_rassor_simulation</name>
+  <version>0.0.1</version>
+  <description>Gazebo simulation package for RE-RASSOR — depth camera, diff drive, and HTTP controller server</description>
+  <maintainer email="re-rassor@ucf.edu">RE-RASSOR Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>std_msgs</depend>
+
+  <!-- Gazebo Harmonic (gz-harmonic) integration for ROS2 Jazzy -->
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+
+  <!-- For depth → LaserScan conversion (/scan for slam_toolbox) -->
+  <exec_depend>depthimage_to_laserscan</exec_depend>
+
+  <!-- For URDF → TF publishing -->
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <!-- RASSOR URDF source -->
+  <exec_depend>ezrassor_description</exec_depend>
+
+  <!-- Optional: re_rassor_controller_server used for command validation if installed -->
+  <exec_depend>re_rassor_controller_server</exec_depend>
+
+  <!-- Python deps for the embedded Flask controller server -->
+  <!-- Install with: pip3 install flask flask-cors flask-socketio numpy opencv-python -->
+  <exec_depend>python3-flask</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

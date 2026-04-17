@@ -1,0 +1,83 @@
+# ros_gz_bridge configuration for RE-RASSOR simulation
+#
+# Bridges Gazebo Harmonic topics ↔ ROS2 topics so the full autonomy stack
+# (rtabmap, slam_toolbox, nav2, mission_control) can consume the same topic
+# names it would see with real hardware.
+#
+# Run via:
+#   ros2 run ros_gz_bridge parameter_bridge \
+#     --ros-args -p config_file:=<path>/ros_gz_bridge.yaml
+
+# ── Simulation clock (Gazebo → ROS) ─────────────────────────────────────────
+# Required for all ROS nodes running with use_sim_time: true.
+# Without this bridge, nodes wait indefinitely for /clock and never process
+# callbacks — mission_control never publishes odom→base_link TF.
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# ── Motion control (ROS → Gazebo) ────────────────────────────────────────────
+- ros_topic_name: "/cmd_vel"
+  gz_topic_name: "/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+# ── Wheel odometry (Gazebo DiffDrive physics → ROS) ─────────────────────────
+# DiffDrive integrates actual joint velocities → more accurate than cmd_vel
+# integration (accounts for acceleration dynamics, avoids odom-ahead-of-physics).
+# SDF: <odom_topic>/odometry/gz_wheel</odom_topic>, <publish_tf>false</publish_tf>
+# simulation_server re-publishes this on /odometry/wheel + /odometry/fused and
+# broadcasts odom→base_footprint TF from it.
+- ros_topic_name: "/odometry/gz_wheel"
+  gz_topic_name: "/odometry/gz_wheel"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+
+# odom→base_footprint TF is published directly by simulation_server.py
+# (TransformBroadcaster from Gazebo DiffDrive odom). DiffDrive publish_tf=false.
+
+# ── Joint states (for robot_state_publisher wheel angle updates) ─────────────
+- ros_topic_name: "/joint_states"
+  gz_topic_name: "/joint_states"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "gz.msgs.Model"
+  direction: GZ_TO_ROS
+
+# ── Color camera image (/camera/image → /camera/color/image_raw) ─────────────
+- ros_topic_name: "/camera/color/image_raw"
+  gz_topic_name: "/camera/image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# ── Depth camera image (/camera/depth_image → /camera/depth/image_raw) ───────
+- ros_topic_name: "/camera/depth/image_raw"
+  gz_topic_name: "/camera/depth_image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# ── Point cloud (/camera/points → /camera/depth/points) ─────────────────────
+- ros_topic_name: "/camera/depth/points"
+  gz_topic_name: "/camera/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+
+# ── Color camera info (/camera/camera_info → /camera/color/camera_info) ──────
+- ros_topic_name: "/camera/color/camera_info"
+  gz_topic_name: "/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+# ── Depth camera info (same source as color — RGBD camera shares intrinsics) ─
+- ros_topic_name: "/camera/depth/camera_info"
+  gz_topic_name: "/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS

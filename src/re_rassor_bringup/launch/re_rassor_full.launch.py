@@ -280,8 +280,9 @@ def generate_launch_description():
         parameters=[{
             "model_path": "yolov8n.pt",
             "confidence": 0.2,
-        }],
-    # ── 7. Mission control ────────────────────────────────────────────────
+        }])
+    
+    # ── 9. Mission control ────────────────────────────────────────────────
     # Delayed 6 s — after Nav2 has started its action server.
     mission_control = TimerAction(
         period=6.0,
@@ -301,7 +302,7 @@ def generate_launch_description():
         )],
     )
 
-    # ── 9. RViz2 (optional) ──────────────────────────────────────────────────
+    # ── 10. RViz2 (optional) ──────────────────────────────────────────────────
     rviz_node = TimerAction(
         period=13.0,
         actions=[Node(

@@ -684,7 +684,8 @@ private:
 
         return sendNav2Goal(x, y, yaw);
     }
-};
+  }
+}
 
 // -----------------------------------------------------------------------------
 int main(int argc, char ** argv)

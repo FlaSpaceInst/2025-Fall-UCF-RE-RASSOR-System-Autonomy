@@ -281,6 +281,24 @@ def generate_launch_description():
             "model_path": "yolov8n.pt",
             "confidence": 0.2,
         }],
+    # ── 7. Mission control ────────────────────────────────────────────────
+    # Delayed 6 s — after Nav2 has started its action server.
+    mission_control = TimerAction(
+        period=6.0,
+        actions=[Node(
+            package="re_rassor_mission_control",
+            executable="mission_control",
+            name="mission_control",
+            output="screen",
+            parameters=[{
+                "wheel_odom_topic":  "/odometry/wheel",
+                "visual_odom_topic": "/odom",
+                "fused_odom_topic":  "/odometry/fused",
+                "navigate_topic":     "/navigate",
+                "calibrate_topic":    "/calibrate",
+                "visual_weight":     0.0,   # override with visual_weight:=0.3 when SLAM running
+            }],
+        )],
     )
 
     # ── 9. RViz2 (optional) ──────────────────────────────────────────────────

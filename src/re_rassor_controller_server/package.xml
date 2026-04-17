@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>re_rassor_controller_server</name>
+  <version>1.0.0</version>
+  <description>
+    Flask HTTP server that bridges the EZRassor mobile controller app to ROS2.
+    Publishes wheel, shoulder, drum, arm and routine commands to ROS topics.
+    Provides /navigate (Nav2 goal) and /calibrate (odometry reset) endpoints.
+    Ported from 2023 ezrassor_controller_server.
+  </description>
+  <maintainer email="your.email@ucf.edu">RE-RASSOR Team</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

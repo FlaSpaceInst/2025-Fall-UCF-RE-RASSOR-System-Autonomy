@@ -49,7 +49,12 @@ endif()
 # Testing
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  # uncrustify parses .h files as C and crashes on C++ template syntax;
+  # run it manually on the test file only.
+  set(AMENT_LINT_AUTO_EXCLUDE ament_cmake_uncrustify)
   ament_lint_auto_find_test_dependencies()
+  find_package(ament_cmake_uncrustify REQUIRED)
+  ament_uncrustify(test/obstacle_map_tests.cpp)
 
   # GoogleTest
   find_package(ament_cmake_gtest REQUIRED)

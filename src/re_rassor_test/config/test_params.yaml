@@ -1,0 +1,17 @@
+# re_rassor_test — scan_to_costmap_node parameter overrides for testing.
+# These values match the defaults in the node but are spelled out explicitly
+# so tests are not sensitive to future upstream changes.
+#
+# The main difference from production config is costmap_publish_hz=20.0 for
+# integration tests (faster response) versus 5.0 for E2E/Gazebo tests.
+
+scan_to_costmap:
+  ros__parameters:
+    resolution:         0.05    # metres per grid cell
+    grid_cells_x:       400     # 20 m wide  (400 * 0.05)
+    grid_cells_y:       400     # 20 m tall
+    scan_row_min:       0.20    # use rows 20%–80% of image height
+    scan_row_max:       0.80
+    range_min:          0.3     # metres — closer readings ignored
+    range_max:          4.0     # metres — all test obstacles within 4 m
+    costmap_publish_hz: 5.0     # Hz — matches Nav2 local costmap update rate

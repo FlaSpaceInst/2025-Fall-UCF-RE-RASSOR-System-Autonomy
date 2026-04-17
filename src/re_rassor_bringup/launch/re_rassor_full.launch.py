@@ -1,270 +1,286 @@
-"""
-re_rassor_full.launch.py
-─────────────────────────
-Starts the complete RE-RASSOR stack in the correct order:
-
-  0. static_transform_publisher   base_link → camera_link
-  1. motor_controller             /odometry/wheel
-  2. depth_costmap_node           /camera/image/rgb
-                                  /camera/depth/image   (32FC1)
-                                  /camera/camera_info
-                                  /camera/scan
-                                  /camera/depth/points
-  3. scan_to_costmap_node         /scan_costmap
-  4. rgbd_odometry (rtabmap)      /odom  (no TF — mission_control owns it)
-  5. rtabmap SLAM                 /map   + map→odom TF
-  6. Nav2 bringup                 /navigate_to_pose action server
-  7. mission_control              /odometry/fused  + odom→base_link TF
-                                  /re_rassor/calibrate service
-  8. RViz (optional)
-
-Usage:
-  ros2 launch re_rassor_bringup re_rassor_full.launch.py
-
-  # Override server IP if different:
-  ros2 launch re_rassor_bringup re_rassor_full.launch.py server_ip:=10.127.234.196
-
-  # Open RViz:
-  ros2 launch re_rassor_bringup re_rassor_full.launch.py rviz:=true
-
-  # After launch — calibrate (hold robot still, facing forward):
-  ros2 service call /re_rassor/calibrate std_srvs/srv/Trigger
-
-  # Navigate (rover frame: +X=right, +Y=forward, theta=CCW rad):
-  ros2 run re_rassor_mission_control navigate_cli -- 0.0 3.0 0.0
-"""
-
+import os
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument,
-    GroupAction,
-    TimerAction,
+    DeclareLaunchArgument, TimerAction, GroupAction, IncludeLaunchDescription,
+    ExecuteProcess,
 )
-from launch.conditions import IfCondition
-from launch.substitutions import (
-    LaunchConfiguration,
-    PathJoinSubstitution,
-    PythonExpression,
-)
+from launch.launch_description_sources import AnyLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from launch.conditions import IfCondition
 
 
 def generate_launch_description():
 
-    # ── Launch arguments ──────────────────────────────────────────────────
-    args = [
+    # ── Launch args ──────────────────────────────────────────────────────────
+    rviz = LaunchConfiguration("rviz")
+
+    declare_args = [
         DeclareLaunchArgument(
-            "server_ip", default_value="10.127.234.196",
-            description="IP of the Windows depth_server.py host"),
+            "wheel_port",
+            default_value="/dev/arduino_wheel",
+            description="Serial port for wheel Arduino",
+        ),
         DeclareLaunchArgument(
-            "server_port", default_value="5000",
-            description="HTTP rover controller port"),
+            "drum_port",
+            default_value="/dev/arduino_drum",
+            description="Serial port for drum/shoulder Arduino",
+        ),
         DeclareLaunchArgument(
-            "ws_port", default_value="8765",
-            description="WebSocket depth stream port"),
+            "baud_rate",
+            default_value="115200",
+            description="Serial baud rate",
+        ),
         DeclareLaunchArgument(
-            "localization", default_value="false",
-            description="rtabmap: true=localization only, false=mapping"),
-        DeclareLaunchArgument(
-            "rviz", default_value="false",
-            description="Launch RViz2"),
-        DeclareLaunchArgument(
-            "visual_weight", default_value="0.0",  # 0.0=wheel only; set >0 when camera moving
-            description="Visual odom weight in fusion [0.0=wheel only, 1.0=visual only]"),
-        # Camera mount extrinsics (metres / radians)
-        DeclareLaunchArgument("cam_x",     default_value="0.15"),
-        DeclareLaunchArgument("cam_y",     default_value="0.0"),
-        DeclareLaunchArgument("cam_z",     default_value="0.10"),
-        DeclareLaunchArgument("cam_roll",  default_value="0.0"),
-        DeclareLaunchArgument("cam_pitch", default_value="0.087"),
-        DeclareLaunchArgument("cam_yaw",   default_value="0.0"),
+            "rviz",
+            default_value="false",
+            description="Launch RViz2",
+        ),
     ]
 
-    server_ip     = LaunchConfiguration("server_ip")
-    server_port   = LaunchConfiguration("server_port")
-    ws_port_str   = LaunchConfiguration("ws_port")     # string from CLI
-    localization  = LaunchConfiguration("localization")
-    rviz          = LaunchConfiguration("rviz")
-    visual_weight = LaunchConfiguration("visual_weight")
-
-    # ── 0. Static TF: base_link → camera_link ────────────────────────────
-    # Must be up before rtabmap tries any TF lookups.
-    static_tf = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="base_link_to_camera_link",
-        output="screen",
-        # stp argument order: x y z yaw pitch roll parent child
-        arguments=[
-            LaunchConfiguration("cam_x"),
-            LaunchConfiguration("cam_y"),
-            LaunchConfiguration("cam_z"),
-            LaunchConfiguration("cam_yaw"),
-            LaunchConfiguration("cam_pitch"),
-            LaunchConfiguration("cam_roll"),
-            "base_link",
-            "camera_link",
-        ],
-    )
-
-    # ── 1. Motor controller ───────────────────────────────────────────────
-    # server_port=8000: depth_server.py Flask runs on 8000 (merged controller).
-    # server_ip is a LaunchConfiguration string substitution — pass it in a
-    # separate dict so ROS2 handles the type correctly at launch time.
-    motor_controller = Node(
-        package="re_rassor_motor_controller",
-        executable="motor_controller",
-        name="motor_controller",
-        output="screen",
-        parameters=[
-            {"server_ip":       server_ip},   # substitution resolved at launch
-            {
-                "server_port":      8000,     # depth_server.py HTTP port
-                "update_rate":      50.0,
-                "skid_correction":  0.7,
-                "command_timeout":  1.0,
-            },
-        ],
-    )
-
-    # ── 2. Depth costmap node ─────────────────────────────────────────────
-    # ws_port must be passed as an integer parameter.
-    # LaunchConfiguration returns a string, so we pass the default int here
-    # and let the user override via --ros-args if needed.
-    depth_costmap = Node(
-        package="re_rassor_obstacle_detection",
-        executable="depth_costmap_node",
-        name="depth_costmap_node",
-        output="screen",
-        parameters=[{
-            "ws_host": server_ip,
-            "ws_port": 8765,       # int literal — declare_parameter expects int
-            "fx":      525.0,
-            "fy":      525.0,
-            "cx":      320.0,
-            "cy":      240.0,
-            "width":   640,
-            "height":  480,
-        }],
-    )
-
-    # ── 3. Scan → costmap ─────────────────────────────────────────────────
-    scan_costmap = Node(
-        package="re_rassor_obstacle_detection",
-        executable="scan_to_costmap_node",
-        name="scan_to_costmap_node",
-        output="screen",
-    )
-
-    # ── 4. rtabmap rgbd_odometry ──────────────────────────────────────────
-    # publish_tf=false: mission_control owns the odom→base_link TF.
-    # Delayed 3 s to give depth_costmap_node time to connect to the server
-    # and start publishing camera topics before rtabmap starts waiting.
-    rtabmap_odom = TimerAction(
-        period=3.0,
-        actions=[Node(
-            package="rtabmap_odom",
-            executable="rgbd_odometry",
-            name="rgbd_odometry",
-            output="screen",
-            parameters=[{
-                "frame_id":                "base_link",
-                "odom_frame_id":           "odom",
-                "approx_sync":             True,
-                "queue_size":              10,
-                "publish_tf":              False,
-                "Vis/MinInliers":          "6",
-                "Vis/FeatureType":         "8",
-                "Vis/CorNNDRRatio":        "0.8",
-                "OdomF2M/BundleAdjustment":"0",
-            }],
-            remappings=[
-                ("rgb/image",       "/camera/image/rgb"),
-                ("depth/image",     "/camera/depth/image"),
-                ("rgb/camera_info", "/camera/camera_info"),
-                ("odom",            "/odom"),
-            ],
-        )],
-    )
-
-    # ── 5. rtabmap SLAM ───────────────────────────────────────────────────
-    rtabmap_slam = TimerAction(
-        period=3.0,
-        actions=[Node(
-            package="rtabmap_slam",
-            executable="rtabmap",
-            name="rtabmap",
-            output="screen",
-            parameters=[{
-                "frame_id":           "base_link",
-                "odom_frame_id":      "odom",
-                "approx_sync":        True,
-                "sync_queue_size":    10,
-                "subscribe_depth":    True,
-                "subscribe_scan":     True,
-                "database_path":      "~/.ros/rtabmap_re_rassor.db",
-                # rtabmap string params must be passed as strings, not bools.
-                # Localization flag is passed via --Mem/IncrementalMemory CLI arg.
-                "Reg/Strategy":       "1",
-                "Vis/MinInliers":     "8",   # rtabmap enforces minimum of 8
-                "RGBD/AngularUpdate": "0.01",
-                "RGBD/LinearUpdate":  "0.01",
-            }],
-            arguments=["--delete_db_on_start"],
-            remappings=[
-                ("rgb/image",       "/camera/image/rgb"),
-                ("depth/image",     "/camera/depth/image"),
-                ("rgb/camera_info", "/camera/camera_info"),
-                ("scan",            "/camera/scan"),
-                ("odom",            "/odom"),
-                ("map",             "/map"),
-            ],
-        )],
-    )
-
-    # ── 6. Nav2 bringup ───────────────────────────────────────────────────
-    # Launch only the nodes listed in lifecycle_manager/node_names.
-    # navigation_launch.py from nav2_bringup also starts route_server,
-    # opennav_docking, and collision_monitor which fail on some Jazzy
-    # installs and cause lifecycle_manager to abort the whole bringup.
-    # We launch each node individually so we control the exact set.
-    nav2_params_file = PathJoinSubstitution([
+    # ── Params paths ─────────────────────────────────────────────────────────
+    nav2_params = PathJoinSubstitution([
         FindPackageShare("re_rassor_bringup"),
         "config",
         "nav2_params.yaml",
     ])
 
+    slam_params = PathJoinSubstitution([
+        FindPackageShare("re_rassor_bringup"),
+        "config",
+        "slam_toolbox_params.yaml",
+    ])
+
+    # ── 0a. Static TF: base_link → camera_link ───────────────────────────────
+    # 0.15 m forward, 0.10 m up, 5° downward pitch (0.087 rad).
+    static_tf_base_to_camera = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="base_to_camera_tf",
+        arguments=["0.15", "0", "0.10", "0", "0.087", "0",
+                   "base_link", "camera_link"],
+        output="screen",
+    )
+
+    # ── 0b. Static TF: camera_link → camera_depth_optical_frame ────────────
+    static_tf_depth_optical = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="camera_depth_optical_tf",
+        arguments=["0", "0", "0", "-1.5708", "0", "-1.5708",
+                   "camera_link", "camera_depth_optical_frame"],
+        output="screen",
+    )
+
+    # ── 0d. Fake map — publish a blank free-space OccupancyGrid on /map ────────
+    # Gives Nav2 a valid latched map immediately so costmaps initialise before
+    # slam_toolbox builds a real one.
+    # Walk up from this file until fake_map.py is found — works from both the
+    # source tree and the colcon install/ tree (which are at different depths).
+    _fake_map_script = None
+    _candidate = os.path.dirname(os.path.realpath(__file__))
+    for _ in range(10):
+        _candidate = os.path.dirname(_candidate)
+        _probe = os.path.join(_candidate, 'fake_map.py')
+        if os.path.isfile(_probe):
+            _fake_map_script = _probe
+            break
+    if _fake_map_script is None:
+        raise RuntimeError(
+            "fake_map.py not found in any ancestor directory of this launch file. "
+            "Ensure fake_map.py is at the workspace root.")
+    fake_map = ExecuteProcess(
+        cmd=['python3', _fake_map_script],
+        output='screen',
+    )
+
+    # ── 1. Motor controller (serial) ─────────────────────────────────────────
+    motor = Node(
+        package="re_rassor_motor_controller",
+        executable="serial_motor_controller",
+        name="serial_motor_controller",
+        output="screen",
+        parameters=[{
+            "wheel_port": LaunchConfiguration("wheel_port"),
+            "drum_port":  LaunchConfiguration("drum_port"),
+            "baud_rate":  LaunchConfiguration("baud_rate"),
+        }],
+    )
+
+    # ── 2. Astra Pro camera — depth only, 320×240 ───────────────────────────
+    # Color disabled: Le Potato USB 2.0 cannot sustain both streams simultaneously.
+    # publish_tf=false: static TFs above replace the driver's dynamic ones.
+    # 320×240 depth: 4× fewer points than 640×480 — sufficient for obstacle
+    # detection at the rover's operating range (< 4 m).
+    astra_camera = IncludeLaunchDescription(
+        AnyLaunchDescriptionSource([
+            PathJoinSubstitution([
+                FindPackageShare("astra_camera"),
+                "launch",
+                "astra_pro.launch.xml",
+            ])
+        ]),
+        launch_arguments={
+            "publish_tf":    "false",
+            "enable_color":  "false",
+            "depth_width":   "320",
+            "depth_height":  "240",
+        }.items(),
+    )
+
+    # ── 3. Depth → PointCloud2 (depth_image_proc) ───────────────────────────
+    # Converts /camera/depth/image_raw + /camera/depth/camera_info
+    # into /camera/depth/points (PointCloud2).
+    # Required by Nav2 costmaps:
+    #   - local_costmap  voxel_layer    reads /camera/depth/points
+    #   - global_costmap obstacle_layer reads /camera/depth/points
+    depth_to_pointcloud = Node(
+        package="depth_image_proc",
+        executable="point_cloud_xyz_node",
+        name="depth_to_pointcloud",
+        output="screen",
+        remappings=[
+            ("image_rect",  "/camera/depth/image_raw"),
+            ("camera_info", "/camera/depth/camera_info"),
+            ("points",      "/camera/depth/points"),
+        ],
+    )
+
+    # ── 4. Depth → LaserScan (depthimage_to_laserscan) ──────────────────────
+    # Converts a horizontal slice of the depth image into a 2D laser scan.
+    # This is the input to slam_toolbox.
+    #
+    # scan_height=1: single-row scan — fast and sufficient for 2D SLAM.
+    # range_min=0.45: Astra Pro minimum reliable depth distance.
+    # output_frame=camera_link: scan is in the camera optical frame; the
+    #   static TF chain (base_link→camera_link→camera_depth_optical_frame)
+    #   lets slam_toolbox transform it to base_link automatically.
+    depth_to_laserscan = Node(
+        package="depthimage_to_laserscan",
+        executable="depthimage_to_laserscan_node",
+        name="depth_to_laserscan",
+        output="screen",
+        remappings=[
+            ("depth",             "/camera/depth/image_raw"),
+            ("depth_camera_info", "/camera/depth/camera_info"),
+            ("scan",              "/scan"),
+        ],
+        parameters=[{
+            "scan_height":   1,
+            "range_min":     0.45,
+            "range_max":     4.0,
+            "output_frame":  "camera_link",
+        }],
+    )
+
+    # ── 5. Mission control ───────────────────────────────────────────────────
+    # Fuses /odometry/wheel + /odom → /odometry/fused.
+    # Broadcasts odom→base_link TF.
+    # visual_weight=0.0: pure wheel odometry (no visual correction).
+    mission_control = TimerAction(
+        period=5.0,
+        actions=[Node(
+            package="re_rassor_mission_control",
+            executable="mission_control",
+            name="mission_control",
+            output="screen",
+            parameters=[{
+                "wheel_odom_topic":  "/odometry/wheel",
+                "visual_odom_topic": "/odom",
+                "fused_odom_topic":  "/odometry/fused",
+                "visual_weight":     0.0,
+            }],
+        )],
+    )
+
+    # ── 6. slam_toolbox — async mapping ────────────────────────────────────
+    # Receives /scan (from depthimage_to_laserscan) and the odom→base_link TF
+    # (from mission_control / wheel odometry) to build a 2D occupancy map.
+    #
+    # slam_toolbox owns the map→odom TF (localization).
+    # mission_control owns odom→base_link TF (wheel odometry).
+    #
+    # Delayed 6 s — needs the TF chain (static TFs + odom→base_link from
+    # mission_control at t=5 s) and laser scans to be available first.
+    slam = TimerAction(
+        period=6.0,
+        actions=[Node(
+            package="slam_toolbox",
+            executable="async_slam_toolbox_node",
+            name="slam_toolbox",
+            output="screen",
+            parameters=[slam_params],
+        )],
+    )
+
+    # ── 7. Nav2 stack ────────────────────────────────────────────────────────
+    # Delayed 12 s — slam_toolbox must be publishing /map and map→odom TF
+    # before Nav2 costmaps and bt_navigator initialize.
+    #
+    # global costmap: static_layer reads /map (from slam_toolbox) +
+    #                 obstacle_layer reads /camera/depth/points (live obstacles)
+    # local costmap:  voxel_layer reads /camera/depth/points
     nav2_nodes = [
-        Node(package="nav2_controller",     executable="controller_server",
-             name="controller_server",      output="screen",
-             parameters=[nav2_params_file]),
-        Node(package="nav2_smoother",        executable="smoother_server",
-             name="smoother_server",         output="screen",
-             parameters=[nav2_params_file]),
-        Node(package="nav2_planner",         executable="planner_server",
-             name="planner_server",          output="screen",
-             parameters=[nav2_params_file]),
-        Node(package="nav2_behaviors",       executable="behavior_server",
-             name="behavior_server",         output="screen",
-             parameters=[nav2_params_file]),
-        Node(package="nav2_bt_navigator",    executable="bt_navigator",
-             name="bt_navigator",            output="screen",
-             parameters=[nav2_params_file]),
-        Node(package="nav2_waypoint_follower", executable="waypoint_follower",
-             name="waypoint_follower",         output="screen",
-             parameters=[nav2_params_file]),
-        Node(package="nav2_velocity_smoother", executable="velocity_smoother",
-             name="velocity_smoother",          output="screen",
-             parameters=[nav2_params_file]),
-        # lifecycle_manager: node_names and autostart come from nav2_params.yaml
-        Node(package="nav2_lifecycle_manager", executable="lifecycle_manager",
-             name="lifecycle_manager_navigation", output="screen",
-             parameters=[nav2_params_file]),
+        Node(
+            package="nav2_controller",
+            executable="controller_server",
+            name="controller_server",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+        Node(
+            package="nav2_planner",
+            executable="planner_server",
+            name="planner_server",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+        Node(
+            package="nav2_behaviors",
+            executable="behavior_server",
+            name="behavior_server",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+        Node(
+            package="nav2_bt_navigator",
+            executable="bt_navigator",
+            name="bt_navigator",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+        Node(
+            package="nav2_velocity_smoother",
+            executable="velocity_smoother",
+            name="velocity_smoother",
+            output="screen",
+            parameters=[nav2_params],
+        ),
+        Node(
+            package="nav2_lifecycle_manager",
+            executable="lifecycle_manager",
+            name="lifecycle_manager_navigation",
+            output="screen",
+            parameters=[nav2_params],
+        ),
     ]
 
-    nav2 = TimerAction(period=5.0, actions=[GroupAction(actions=nav2_nodes)])
+    nav2 = TimerAction(period=12.0, actions=[GroupAction(nav2_nodes)])
 
+    # ── 8. YOLO obstacle detector ───────────────────────────────────────────────
+    # NOTE: requires enable_color=true in astra_camera launch above.
+    # On Le Potato (USB 2.0) enabling color may cause bandwidth issues.
+    # Recommended: test USB bandwidth before enabling in production.
+    yolo_detector = Node(
+        package="re_rassor_yolo_detector",
+        executable="yolo_detector",
+        name="yolo_detector",
+        output="screen",
+        parameters=[{
+            "model_path": "yolov8n.pt",
+            "confidence": 0.2,
+        }],
     # ── 7. Mission control ────────────────────────────────────────────────
     # Delayed 6 s — after Nav2 has started its action server.
     mission_control = TimerAction(
@@ -285,9 +301,9 @@ def generate_launch_description():
         )],
     )
 
-    # ── 8. RViz (optional) ────────────────────────────────────────────────
+    # ── 9. RViz2 (optional) ──────────────────────────────────────────────────
     rviz_node = TimerAction(
-        period=7.0,
+        period=13.0,
         actions=[Node(
             package="rviz2",
             executable="rviz2",
@@ -298,14 +314,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        *args,
-        static_tf,          # immediate — TF must exist before everything
-        motor_controller,   # immediate — start publishing wheel odom
-        depth_costmap,      # immediate — start connecting to WebSocket
-        scan_costmap,       # immediate — waits for /camera/scan internally
-        rtabmap_odom,       # +3 s — camera topics should be flowing by now
-        rtabmap_slam,       # +3 s — same
-        nav2,               # +5 s — rtabmap odom→base_link TF should exist
-        mission_control,    # +6 s — Nav2 action server should be ready
-        rviz_node,          # +7 s — everything up
+        *declare_args,
+        fake_map,                   # /map ← blank free-space grid (latched)
+        static_tf_base_to_camera,   # base_link  → camera_link
+        static_tf_depth_optical,    # camera_link → camera_depth_optical_frame
+        motor,
+        astra_camera,
+        depth_to_pointcloud,        # /camera/depth/image_raw → /camera/depth/points (Nav2 costmaps)
+        depth_to_laserscan,         # /camera/depth/image_raw → /scan (slam_toolbox input)
+        mission_control,            # wheel odom → /odometry/fused + odom→base_link TF
+        slam,                       # /scan + odom TF → /map + map→odom TF
+        nav2,
+        rviz_node,
     ])

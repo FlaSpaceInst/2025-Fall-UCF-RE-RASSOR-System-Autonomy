@@ -1,3 +1,22 @@
+// Copyright 2025 UCF RE-RASSOR
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 #pragma once
 
 #include "Vector2.h"
@@ -11,19 +30,17 @@ class Box
 public:
     T left;
     T top;
-    T width; // Must be positive
-    T height; // Must be positive
+    T width;  // Must be positive
+    T height;  // Must be positive
 
-    constexpr Box(T Left = 0, T Top = 0, T Width = 0, T Height = 0) noexcept :
+    explicit constexpr Box(T Left = 0, T Top = 0, T Width = 0, T Height = 0) noexcept :
         left(Left), top(Top), width(Width), height(Height)
     {
-
     }
 
     constexpr Box(const Vector2<T>& position, const Vector2<T>& size) noexcept :
         left(position.x), top(position.y), width(size.x), height(size.y)
     {
-
     }
 
     constexpr T getRight() const noexcept
@@ -64,4 +81,4 @@ public:
     }
 };
 
-}
+}  // namespace quadtree

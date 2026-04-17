@@ -1,0 +1,92 @@
+# slam_toolbox configuration for RE-RASSOR
+# -----------------------------------------
+# Uses async mapping mode: laser scans from depthimage_to_laserscan
+# + wheel odometry (odom→base_link TF from mission_control) → /map
+#
+# slam_toolbox owns the map→odom TF (localization).
+# mission_control owns odom→base_link TF (wheel odometry).
+#
+# Le Potato ARM tuning:
+#   - minimum_time_interval: limits scan processing rate
+#   - map_update_interval: reduces map publish frequency
+#   - minimum_travel_distance/heading: skips redundant scans
+
+slam_toolbox:
+  ros__parameters:
+
+    # ── Solver ────────────────────────────────────────────────────────────────
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ── Frames ────────────────────────────────────────────────────────────────
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+    use_map_saver: true
+    mode: mapping
+
+    # ── Performance tuning for Le Potato ARM ─────────────────────────────────
+    # Only process a new scan every 0.5 s — fast enough for a slow rover
+    # (<0.3 m/s) but keeps CPU load manageable on a single-board ARM.
+    minimum_time_interval: 0.5
+    # Rebuild the occupancy grid every 5 s, not every scan.
+    map_update_interval: 5.0
+    # Skip scans if the robot hasn't moved enough — avoids redundant work
+    # when the rover is stationary or turning slowly.
+    minimum_travel_distance: 0.3    # metres
+    minimum_travel_heading: 0.3     # radians (~17°)
+
+    # ── Map parameters ────────────────────────────────────────────────────────
+    resolution: 0.05                # matches nav2_params costmap resolution
+    max_laser_range: 4.0            # matches Astra Pro range and depth config
+
+    # ── TF / timing ──────────────────────────────────────────────────────────
+    transform_publish_period: 0.02  # 50 Hz map→odom TF
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+
+    # ── Scan matching ─────────────────────────────────────────────────────────
+    use_scan_matching: true
+    use_scan_barycenter: true
+    throttle_scans: 1
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+
+    # ── Loop closure ─────────────────────────────────────────────────────────
+    # Conservative thresholds for an open regolith environment where true
+    # loop closures are rare (no corridors, few repeating structures).
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+    link_match_minimum_response_fine: 0.1
+    distance_decomposition_radius: 2.0
+    search_maximum_distance: 1.0
+
+    # ── Correlation parameters ────────────────────────────────────────────────
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # ── Scan matcher penalties ────────────────────────────────────────────────
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+    debug_logging: false
+    stack_size_to_use: 40000000
+    enable_interactive_mode: false   # saves CPU — no RViz interaction needed

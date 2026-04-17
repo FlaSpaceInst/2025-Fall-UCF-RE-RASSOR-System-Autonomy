@@ -1,0 +1,132 @@
+<?xml version="1.0" ?>
+<!--
+  obstacle_test.world  —  Gazebo Harmonic (gz sim) format
+  ─────────────────────────────────────────────────────────────────────────────
+  RE-RASSOR obstacle detection E2E test world.
+
+  The rassor_astra robot spawns at the world origin (0, 0, 0) facing +X.
+  Three static boxes at known positions within Astra Pro depth range (0.3–8 m):
+
+    Obstacle A: (1.5,  0.0, 0.5)  — directly ahead,  1.50 m
+    Obstacle B: (2.0, -0.5, 0.5)  — ahead-right,     ~2.06 m
+    Obstacle C: (1.0,  0.3, 0.5)  — ahead-left,      ~1.04 m
+
+  Box size: 0.5 m × 0.5 m × 1.0 m (tall enough to be in the 20%–80% scan band).
+
+  Required Gazebo Harmonic system plugins are declared inside <world>:
+    Physics, Sensors (ogre2 renderer), SceneBroadcaster, UserCommands.
+  Sun and ground plane are defined inline (no model:// URI lookups).
+-->
+<sdf version="1.9">
+  <world name="obstacle_test">
+
+    <!-- ── Gazebo Harmonic system plugins ──────────────────────────────────── -->
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+
+    <!-- ── Physics ─────────────────────────────────────────────────────────── -->
+    <physics name="default_physics" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- ── Lighting ────────────────────────────────────────────────────────── -->
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10  0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.5 0.5 0.5 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+    </light>
+
+    <!-- ── Ground plane (inline — avoids model:// URI lookup) ─────────────── -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="col">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>200 200</size></plane>
+          </geometry>
+        </collision>
+        <visual name="vis">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>200 200</size></plane>
+          </geometry>
+          <material>
+            <ambient>0.7 0.7 0.7 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ── Obstacle A: 1.5 m directly ahead ───────────────────────────────── -->
+    <model name="obstacle_a">
+      <static>true</static>
+      <pose>1.5 0.0 0.5  0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+          <material>
+            <ambient>0.8 0.2 0.2 1</ambient>
+            <diffuse>0.8 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ── Obstacle B: 2.0 m ahead, 0.5 m right (−Y in ROS) ──────────────── -->
+    <model name="obstacle_b">
+      <static>true</static>
+      <pose>2.0 -0.5 0.5  0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+          <material>
+            <ambient>0.2 0.8 0.2 1</ambient>
+            <diffuse>0.2 0.8 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ── Obstacle C: 1.0 m ahead, 0.3 m left (+Y in ROS) ───────────────── -->
+    <model name="obstacle_c">
+      <static>true</static>
+      <pose>1.0 0.3 0.5  0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+          <material>
+            <ambient>0.2 0.2 0.8 1</ambient>
+            <diffuse>0.2 0.2 0.8 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

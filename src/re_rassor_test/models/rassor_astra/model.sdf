@@ -1,0 +1,140 @@
+<?xml version="1.0" ?>
+<!--
+  rassor_astra/model.sdf  —  Gazebo Harmonic (gz sim) format
+  ─────────────────────────────────────────────────────────────────────────────
+  Minimal robot model for re_rassor_test end-to-end tests.
+
+  In Gazebo Harmonic sensors publish on Gazebo internal topics; ros_gz_bridge
+  in the launch file bridges them to ROS2.  There are NO libgazebo_ros_*.so
+  plugins — those are Gazebo Classic only.
+
+  Topology:
+    base_link  (chassis box)
+      └── camera_link  (Astra Pro body, fixed joint)
+              ├── sensor: astra_color  (type="camera")
+              │           Gz topic: /camera/color/image_raw
+              │           Gz topic: /camera/color/camera_info
+              └── sensor: astra_depth (type="depth_camera")
+                          Gz topic: /camera/depth/image_raw
+                          Gz topic: /camera/depth/camera_info
+                          Gz topic: /camera/depth/points
+
+  Camera intrinsics match the physical Astra Pro @ 640×480, 60° HFOV:
+    fx = fy = 554.26,  cx = 320,  cy = 240
+
+  Camera mount matches re_rassor_full.launch.py static TF:
+    position: x=+0.15 m (forward), z=+0.20 m (chassis + offset)
+    pitch:    +0.087 rad (5° downward)
+-->
+<sdf version="1.9">
+  <model name="rassor_astra">
+
+    <!-- ── Chassis ──────────────────────────────────────────────────────── -->
+    <link name="base_link">
+      <pose>0 0 0.1  0 0 0</pose>
+      <inertial>
+        <mass>10.0</mass>
+        <inertia>
+          <ixx>0.083</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.083</iyy><iyz>0</iyz>
+          <izz>0.083</izz>
+        </inertia>
+      </inertial>
+      <collision name="chassis_col">
+        <geometry><box><size>0.45 0.30 0.15</size></box></geometry>
+      </collision>
+      <visual name="chassis_vis">
+        <geometry><box><size>0.45 0.30 0.15</size></box></geometry>
+        <material>
+          <ambient>0.4 0.4 0.4 1</ambient>
+          <diffuse>0.4 0.4 0.4 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <!-- ── Camera link ──────────────────────────────────────────────────── -->
+    <link name="camera_link">
+      <pose>0.15 0 0.20  0 0.087 0</pose>
+      <inertial>
+        <mass>0.1</mass>
+        <inertia>
+          <ixx>1e-4</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1e-4</iyy><iyz>0</iyz>
+          <izz>1e-4</izz>
+        </inertia>
+      </inertial>
+      <collision name="cam_col">
+        <geometry><box><size>0.06 0.16 0.03</size></box></geometry>
+      </collision>
+      <visual name="cam_vis">
+        <geometry><box><size>0.06 0.16 0.03</size></box></geometry>
+        <material>
+          <ambient>0.1 0.1 0.1 1</ambient>
+          <diffuse>0.1 0.1 0.1 1</diffuse>
+        </material>
+      </visual>
+
+      <!-- ── Astra Pro RGB sensor ──────────────────────────────────────── -->
+      <!-- Required by rtabmap rgbd_odometry for visual feature matching.  -->
+      <!-- ros_gz_bridge maps the Gz topic to /camera/color/image_raw.     -->
+      <sensor name="astra_color" type="camera">
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <camera name="color">
+          <!-- 60° HFOV: fx = 320 / tan(30°) ≈ 554 -->
+          <horizontal_fov>1.0472</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>RGB_INT8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100.0</far>
+          </clip>
+        </camera>
+        <!-- Gz topic name (no leading slash = relative to world namespace) -->
+        <topic>camera/color/image_raw</topic>
+        <!-- frame_id written into the published CameraInfo -->
+        <gz_frame_id>camera_color_optical_frame</gz_frame_id>
+        <visualize>false</visualize>
+      </sensor>
+
+      <!-- ── Astra Pro depth sensor ────────────────────────────────────── -->
+      <!-- ros_gz_bridge maps the Gz topic to /camera/depth/image_raw and  -->
+      <!-- /camera/depth/points.                                            -->
+      <sensor name="astra_depth" type="depth_camera">
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <camera name="depth">
+          <horizontal_fov>1.0472</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <!-- R_FLOAT32 → bridged as 32FC1 sensor_msgs/Image -->
+            <format>R_FLOAT32</format>
+          </image>
+          <clip>
+            <near>0.3</near>
+            <far>8.0</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.005</stddev>
+          </noise>
+        </camera>
+        <topic>camera/depth/image_raw</topic>
+        <gz_frame_id>camera_depth_optical_frame</gz_frame_id>
+        <visualize>false</visualize>
+      </sensor>
+    </link>
+
+    <!-- ── Joints ───────────────────────────────────────────────────────── -->
+    <joint name="chassis_to_camera" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+    </joint>
+
+  </model>
+</sdf>

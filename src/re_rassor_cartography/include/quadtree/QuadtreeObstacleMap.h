@@ -1,3 +1,22 @@
+// Copyright 2025 UCF RE-RASSOR
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 #pragma once
 
 #include <vector>
@@ -20,7 +39,7 @@ struct Obstacle
     Float y;
     Float size;
 
-    constexpr Obstacle(Float X = 0, Float Y = 0, Float Size = 1) noexcept
+    explicit constexpr Obstacle(Float X = 0, Float Y = 0, Float Size = 1) noexcept
         : x(X), y(Y), size(Size)
     {
     }
@@ -56,7 +75,7 @@ public:
      * @param height Total height of the world
      * @param obstacleSize Default size for obstacles
      */
-    QuadtreeObstacleMap(Float centerX, Float centerY, Float width, Float height,
+    explicit QuadtreeObstacleMap(Float centerX, Float centerY, Float width, Float height,
                         Float obstacleSize = 1.0f)
         : mObstacleSize(obstacleSize)
     {
@@ -214,9 +233,9 @@ private:
     using TreeType = Quadtree<Obstacle<Float>*, GetBoxFunc>;
 
     Float mObstacleSize;
-    std::deque<Obstacle<Float>> mObstacles;  // deque doesn't invalidate pointers on growth
+    std::deque<Obstacle<Float>> mObstacles;  // deque: no pointer invalidation on push_back
     GetBoxFunc mGetBox;
     std::unique_ptr<TreeType> mTree;
 };
 
-} // namespace quadtree
+}  // namespace quadtree

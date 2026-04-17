@@ -22,18 +22,16 @@ find_package(nlohmann_json REQUIRED)  # Added for JSON support
 # Include directories
 include_directories(include)
 
-# Add executable
+# ── motor_controller (HTTP-based, original) ───────────────────────────────────
 add_executable(motor_controller
   src/motor_controller.cpp
 )
 
-# Set include directories for the target
 target_include_directories(motor_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
 
-# Link dependencies
 ament_target_dependencies(motor_controller
   rclcpp
   std_msgs
@@ -46,20 +44,51 @@ ament_target_dependencies(motor_controller
   std_srvs
 )
 
-# Link libraries
 target_link_libraries(motor_controller
   CURL::libcurl
-  nlohmann_json::nlohmann_json  # Added JSON library
+  nlohmann_json::nlohmann_json
 )
+
+# ── serial_motor_controller (serial-hardware, same interface) ─────────────────
+# Compile as a library first so the test target can link against it.
+add_library(serial_motor_controller_lib
+  src/serial_motor_controller.cpp
+)
+target_include_directories(serial_motor_controller_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+ament_target_dependencies(serial_motor_controller_lib
+  rclcpp
+  std_msgs
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  re_rassor_interfaces
+  tf2
+  tf2_geometry_msgs
+  std_srvs
+)
+
+add_executable(serial_motor_controller
+  src/serial_motor_controller_main.cpp
+)
+target_include_directories(serial_motor_controller PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+target_link_libraries(serial_motor_controller serial_motor_controller_lib)
 
 # Install include directory
 install(DIRECTORY include/
   DESTINATION include/${PROJECT_NAME}
 )
 
-# Install targets
+# Install executables and library
 install(TARGETS
   motor_controller
+  serial_motor_controller
+  serial_motor_controller_lib
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -69,7 +98,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_lint_auto_find_test_dependencies()
 
-  # C++ unit tests
+  # C++ unit tests (odometry math, velocity clamping, routine flags)
   ament_add_gtest(test_motor_controller_cpp
     test/test_motor_controller.cpp
   )
@@ -77,6 +106,25 @@ if(BUILD_TESTING)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
   )
+
+  # C++ Arduino simulation tests — verify serial bytes via pty
+  ament_add_gtest(test_serial_arduino_sim
+    test/test_serial_arduino_sim.cpp
+  )
+  target_include_directories(test_serial_arduino_sim PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+  )
+  ament_target_dependencies(test_serial_arduino_sim
+    rclcpp
+    std_msgs
+    nav_msgs
+    geometry_msgs
+    re_rassor_interfaces
+    tf2
+    tf2_geometry_msgs
+  )
+  target_link_libraries(test_serial_arduino_sim serial_motor_controller_lib util)  # util for openpty()
 
   # Python integration tests
   ament_add_pytest_test(test_motor_controller_py

@@ -40,8 +40,7 @@ function createWindow() {
     });
 
     win.loadURL(`http://127.0.0.1:${PORT}`);
-    // Comment out the line below to hide DevTools in production builds.
-    // win.webContents.openDevTools();
+    win.webContents.openDevTools();
 
     const menu = Menu.buildFromTemplate([
         { label: 'File', submenu: [{ role: 'quit' }] },
@@ -96,6 +95,60 @@ ipcMain.on('scan-potatoes', (event) => {
     }
 });
 
+// ── Demo simulator ────────────────────────────────────────────────────────────
+let demoSimProcess = null;
+
+ipcMain.on('launch-demo-sim', (event) => {
+    if (demoSimProcess) {
+        try { demoSimProcess.kill('SIGTERM'); } catch (_) {}
+        demoSimProcess = null;
+        event.sender.send('demo-sim-status', 'stopped');
+        return;
+    }
+
+    // Walk up from this file's directory to find demo_sim.launch.py
+    const { execSync } = require('child_process');
+    let simPath = null;
+    let candidate = __dirname;
+    for (let i = 0; i < 10; i++) {
+        candidate = path.dirname(candidate);
+        const probe = path.join(candidate, '2025-Fall-UCF-RE-RASSOR-System-Autonomy');
+        if (require('fs').existsSync(probe)) {
+            simPath = probe;
+            break;
+        }
+    }
+
+    if (!simPath) {
+        event.sender.send('demo-sim-status', 'error');
+        return;
+    }
+
+    const workspaceDir = simPath;
+    const launchFile = 're_rassor_bringup demo_sim.launch.py';
+
+    const proc = spawn('bash', ['-c',
+        `source /opt/ros/jazzy/setup.bash && source ${workspaceDir}/install/setup.bash && ros2 launch re_rassor_bringup demo_sim.launch.py`
+    ], { detached: false, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    // Drain stdout/stderr so the pipe buffer never fills and child processes
+    // never get SIGPIPE / BrokenPipeError.
+    proc.stdout.on('data', (d) => process.stdout.write(d));
+    proc.stderr.on('data', (d) => process.stderr.write(d));
+
+    demoSimProcess = proc;
+    proc.on('error', (err) => {
+        console.error('[demo-sim] spawn error:', err.message);
+        event.sender.send('demo-sim-status', 'error');
+        demoSimProcess = null;
+    });
+    proc.on('close', () => {
+        if (demoSimProcess === proc) demoSimProcess = null;
+        event.sender.send('demo-sim-status', 'stopped');
+    });
+    event.sender.send('demo-sim-status', 'running');
+});
+
 // ── SSH terminal ─────────────────────────────────────────────────────────────
 let sshProcess  = null;
 let sshTarget   = null;
@@ -141,6 +194,7 @@ ipcMain.on('ssh-disconnect', () => {
 });
 
 app.on('window-all-closed', () => {
-    if (sshProcess) { try { sshProcess.kill('SIGTERM'); } catch (_) {} }
+    if (sshProcess)     { try { sshProcess.kill('SIGTERM'); }     catch (_) {} }
+    if (demoSimProcess) { try { demoSimProcess.kill('SIGTERM'); } catch (_) {} }
     if (process.platform !== 'darwin') app.quit();
 });

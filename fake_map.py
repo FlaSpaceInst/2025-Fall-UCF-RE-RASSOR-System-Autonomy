@@ -46,10 +46,16 @@ class FakeMapPublisher(Node):
 def main():
     rclpy.init()
     node = FakeMapPublisher()
-    # spin briefly so transient_local latches the message for late subscribers
-    rclpy.spin_once(node, timeout_sec=2.0)
-    node.destroy_node()
-    rclpy.shutdown()
+    # Keep the publisher alive so the transient_local DataWriter can deliver
+    # the stored map message to any late-joining subscriber (e.g. Nav2 costmaps
+    # that start 8+ seconds after this node).
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

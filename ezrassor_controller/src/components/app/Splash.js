@@ -6,7 +6,6 @@ import * as Font from 'expo-font';
 import ControllerStyle from '../../../src/styles/controller';
 import fsg from '../../../assets/floridaspacegrant.png';
 import { isIpReachable } from '../../functionality/connection';
-import { NativeSearchBar } from 'react-native-screens';
 
 SplashScreen.preventAutoHideAsync();
 

@@ -214,21 +214,31 @@ def main(passed_args=None):
     rclpy.init(args=passed_args)
     node = rclpy.create_node(NODE_NAME)
 
-    # ── Launch re_rassor_full on startup ──────────────────────────────────────
+    # ── Parameters ────────────────────────────────────────────────────────────
     node.declare_parameter('wheel_port', '/dev/arduino_wheel')
     node.declare_parameter('drum_port',  '/dev/arduino_drum')
     node.declare_parameter('baud_rate',  115200)
+    node.declare_parameter('sim_mode',   False)
 
     wheel_port = node.get_parameter('wheel_port').get_parameter_value().string_value
     drum_port  = node.get_parameter('drum_port').get_parameter_value().string_value
     baud_rate  = node.get_parameter('baud_rate').get_parameter_value().integer_value
+    sim_mode   = node.get_parameter('sim_mode').get_parameter_value().bool_value
 
-    launch_proc = subprocess.Popen([
-        'ros2', 'launch', 're_rassor_bringup', 're_rassor_full.launch.py',
-        f'wheel_port:={wheel_port}',
-        f'drum_port:={drum_port}',
-        f'baud_rate:={baud_rate}',
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # ── Launch re_rassor_full on startup (skipped in sim_mode) ───────────────
+    if sim_mode:
+        launch_proc = None
+        node.get_logger().info(
+            'sim_mode=True — skipping re_rassor_full launch '
+            '(demo_sim.launch.py manages the full stack)'
+        )
+    else:
+        launch_proc = subprocess.Popen([
+            'ros2', 'launch', 're_rassor_bringup', 're_rassor_full.launch.py',
+            f'wheel_port:={wheel_port}',
+            f'drum_port:={drum_port}',
+            f'baud_rate:={baud_rate}',
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     rover_name = _get_ip_address()
     rover_ip   = rover_name[3:].replace('_', '.') if rover_name.startswith('ip_') else rover_name
@@ -636,9 +646,19 @@ def main(passed_args=None):
                     '/navigate_to_pose',
                     'nav2_msgs/action/NavigateToPose',
                     goal_yaml,
-                ])
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             node.get_logger().info(
                 f'Navigate: map goal x={x:.3f} y={y:.3f} theta={theta:.3f}')
+
+            # Log send_goal output in a background thread so we can see errors
+            def _log_nav_output(proc):
+                out, err = proc.communicate()
+                if out:
+                    node.get_logger().info(f'[send_goal stdout] {out.decode().strip()}')
+                if err:
+                    node.get_logger().error(f'[send_goal stderr] {err.decode().strip()}')
+            import threading
+            threading.Thread(target=_log_nav_output, args=(_nav_proc,), daemon=True).start()
             return jsonify({'status': 200, 'x': x, 'y': y, 'theta': theta})
 
         except Exception as e:
@@ -651,10 +671,9 @@ def main(passed_args=None):
         if request.method == 'OPTIONS':
             return jsonify({'status': 200})
         _cancel_nav()
-        # Low-level serial HALT (0xFF) first — bypasses ROS entirely so the
-        # Arduino stops even if Nav2 / cmd_vel pipeline is overloaded or stuck.
-        serial_ok = _serial_halt(wheel_port)
-        if not serial_ok:
+        # Low-level serial HALT (0xFF) — skipped in sim_mode (no Arduino).
+        serial_ok = False if sim_mode else _serial_halt(wheel_port)
+        if not sim_mode and not serial_ok:
             node.get_logger().warning(
                 f'Serial HALT failed on {wheel_port} — falling back to /cmd_vel only')
         # Also publish zero Twist so the ROS pipeline stays consistent.
@@ -732,9 +751,11 @@ def main(passed_args=None):
             return jsonify({'status': 503, 'error': 'no odometry received yet'}), 503
         return jsonify({'status': 200, **_latest_odom})
 
-    # ── GET /{rover_name}/command_status ──────────────────────────────────────
-    @app.route(f'/{rover_name}/command_status', methods=['GET'])
-    def command_status():
+    # ── GET /{rover_name}/command_status ────────────────────��────────────────
+    # Accepts any rover-name prefix so localhost connections (ip_127_0_0_1)
+    # resolve to the same handler as the real IP (ip_10_x_x_x).
+    @app.route('/<string:any_rover>/command_status', methods=['GET'])
+    def command_status(any_rover):
         return jsonify({'status': 200, 'rover': rover_name})
 
     # ── WebSocket subscription handlers ──────────────────────────────────────
@@ -874,7 +895,7 @@ def main(passed_args=None):
         f'  ║  HTTP      : http://{rover_ip}:5000/        \n'
         f'  ║  WebSocket : ws://{rover_ip}:5000/socket.io \n'
         f'  ║  Namespace : /{rover_name:<29} ║\n'
-        f'  ║  Launch PID: {launch_proc.pid:<32} ║\n'
+        f'  ║  Launch PID: {"sim_mode (no launch)" if launch_proc is None else launch_proc.pid:<32} ║\n'
         f'  ╚══════════════════════════════════════════════╝'
     )
 
@@ -886,7 +907,8 @@ def main(passed_args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-        launch_proc.terminate()
+        if launch_proc is not None:
+            launch_proc.terminate()
 
 
 if __name__ == '__main__':

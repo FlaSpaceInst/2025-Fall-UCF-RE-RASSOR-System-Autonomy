@@ -37,6 +37,7 @@ export default class IPConnect extends React.Component {
             modalVisible: false,
             foundPotatoes: [],
             scanComplete: false,
+            simRunning: false,
           };
           
         
@@ -59,6 +60,12 @@ export default class IPConnect extends React.Component {
         this._blur = this.props.navigation.addListener('blur', () => {
             this.animation.current?.reset();
         });
+
+        if (window.api?.onDemoSimStatus) {
+            window.api.onDemoSimStatus((status) => {
+                this.setState({ simRunning: status === 'running' });
+            });
+        }
 
         if (window.api?.onPotatoFound) {
             console.log('✅ window.api.onPotatoFound exists');
@@ -278,6 +285,26 @@ export default class IPConnect extends React.Component {
                             style={[ControllerStyle.fsiLogo, { alignSelf: 'auto', height: '21%' }]}
                             resizeMode="contain"
                         />
+
+                        <Pressable
+                            activeOpacity={0.95}
+                            style={[ControllerStyle.buttonContainer, { height: '16%', alignSelf: 'auto', marginRight: '2%', padding: '1.5%', backgroundColor: this.state.simRunning ? '#3a7a3a' : undefined }]}
+                            onPress={() => {
+                                if (window.api?.launchDemoSim) window.api.launchDemoSim();
+                                if (!this.state.simRunning) {
+                                    // auto-connect to localhost after a short delay for the server to start
+                                    setTimeout(() => {
+                                        this.setState({ ip: '127.0.0.1:5000' }, () => {
+                                            this.redirectBasedOnReachability();
+                                        });
+                                    }, 12000);
+                                }
+                            }}
+                        >
+                            <Text style={[ControllerStyle.buttonText, { fontSize: '2vw', fontWeight: '500' }]}>
+                                {this.state.simRunning ? 'Sim Running' : 'Demo Sim'}
+                            </Text>
+                        </Pressable>
 
                         <Pressable
                             activeOpacity={0.95}

@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld('api', {
     });
   },
 
+  // ── Demo simulator ───────────────────────────────────────────────────────
+  launchDemoSim:    () => ipcRenderer.send('launch-demo-sim'),
+  onDemoSimStatus:  (cb) => ipcRenderer.on('demo-sim-status', (_e, status) => cb(status)),
+
   // ── SSH terminal ─────────────────────────────────────────────────────────
   sshConnect:          (target) => ipcRenderer.send('ssh-connect', { target }),
   sshInput:            (data)   => ipcRenderer.send('ssh-input', data),

@@ -1,7 +1,7 @@
 {
   "name": "ezrassor-app",
   "version": "1.0.0",
-  "main": "main.js",
+  "main": "main",
   "private": true,
   "scripts": {
     "web:build": "expo export --platform web",                                                                                                                 

@@ -12,7 +12,7 @@ colcon build --packages-select ezrassor_mission_control
 # Source
 source install/setup.bash
 
-# Run
+# Test
 ros2 run ezrassor_mission_control mission_control \
   --ros-args \
   -p goal_x:=5.0 \
